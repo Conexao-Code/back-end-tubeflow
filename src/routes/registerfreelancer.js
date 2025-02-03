@@ -189,6 +189,4 @@ router.delete('/freelancers/:id', async (req, res) => {
     }
 });
 
-  
-
 module.exports = router;
