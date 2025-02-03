@@ -120,54 +120,75 @@ router.put('/freelancers/:id', async (req, res) => {
 router.delete('/freelancers/:id', async (req, res) => {
     const { id } = req.params;
     let connection;
+    
     try {
-      connection = await req.db.getConnection();
-      await connection.beginTransaction();
-  
-      await connection.query(
-        "UPDATE videos SET thumb_maker_id = NULL WHERE thumb_maker_id = ?",
-        [id]
-      );
-      await connection.query(
-        "UPDATE videos SET editor_id = NULL WHERE editor_id = ?",
-        [id]
-      );
-      await connection.query(
-        "UPDATE videos SET narrator_id = NULL WHERE narrator_id = ?",
-        [id]
-      );
-      await connection.query(
-        "UPDATE videos SET script_writer_id = NULL WHERE script_writer_id = ?",
-        [id]
-      );
-      await connection.query(
-        "UPDATE videos SET freelancer_id = NULL WHERE freelancer_id = ?",
-        [id]
-      );
-  
-      const [result] = await connection.query(
-        "DELETE FROM freelancers WHERE id = ?",
-        [id]
-      );
-  
-      if (result.affectedRows === 0) {
-        await connection.rollback();
+        connection = await req.db.getConnection();
+        await connection.beginTransaction();
+
+        // Buscar a role do freelancer antes de deletá-lo
+        const [freelancer] = await connection.query(
+            "SELECT role FROM freelancers WHERE id = ?",
+            [id]
+        );
+
+        if (freelancer.length === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ message: 'Freelancer não encontrado.' });
+        }
+
+        const role = freelancer[0].role;
+        let columnToUpdate = null;
+
+        // Definir a coluna correta com base na role
+        switch (role) {
+            case 'roteirista':
+                columnToUpdate = 'script_writer_id';
+                break;
+            case 'editor':
+                columnToUpdate = 'editor_id';
+                break;
+            case 'narrador':
+                columnToUpdate = 'narrator_id';
+                break;
+            case 'thumb maker':
+                columnToUpdate = 'thumb_maker_id';
+                break;
+        }
+
+        if (columnToUpdate) {
+            await connection.query(
+                `UPDATE videos SET ${columnToUpdate} = NULL WHERE ${columnToUpdate} = ?`,
+                [id]
+            );
+        }
+
+        // Excluir o freelancer da tabela freelancers
+        const [result] = await connection.query(
+            "DELETE FROM freelancers WHERE id = ?",
+            [id]
+        );
+
+        if (result.affectedRows === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(404).json({ message: 'Freelancer não encontrado.' });
+        }
+
+        await connection.commit();
         connection.release();
-        return res.status(404).json({ message: 'Freelancer não encontrado.' });
-      }
-  
-      await connection.commit();
-      connection.release();
-      res.json({ message: 'Freelancer deletado com sucesso.' });
+        res.json({ message: 'Freelancer deletado com sucesso.' });
+
     } catch (error) {
-      if (connection) {
-        await connection.rollback();
-        connection.release();
-      }
-      console.error('Erro ao deletar freelancer:', error);
-      res.status(500).json({ message: 'Erro ao deletar freelancer.' });
+        if (connection) {
+            await connection.rollback();
+            connection.release();
+        }
+        console.error('Erro ao deletar freelancer:', error);
+        res.status(500).json({ message: 'Erro ao deletar freelancer.' });
     }
-  });
+});
+
   
 
 module.exports = router;
