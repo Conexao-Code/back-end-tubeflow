@@ -1,9 +1,8 @@
-
 require('dotenv').config();
 const express = require('express');
 const app = express();
 const cors = require('cors');
-const { port, webhookUrl, allowedOrigins } = require('./config');
+const { port, allowedOrigins } = require('./config');
 const { connect } = require('./config/database');
 const Login = require('./routes/login');
 const Cadastro = require('./routes/cadastro');
@@ -16,28 +15,18 @@ const Logs = require('./routes/logs');
 const Settings = require('./routes/settings');
 const Admin = require('./routes/admin');
 
-const checkOrigin = (req, res, next) => {
-    const origin = req.headers.origin;
-    next();
-};
-
 async function main() {
     const pool = await connect();
 
+    // 🔹 Permitir todas as origens temporariamente
     app.use(cors({
-        origin: (origin, callback) => {
-            if (!origin || allowedOrigins.includes(origin)) {
-                callback(null, true);
-            } else {
-                callback(new Error('Not allowed by CORS'));
-            }
-        },
+        origin: '*',
         optionsSuccessStatus: 200
     }));
 
     app.use(express.json());
 
-    app.use('/api', checkOrigin, (req, res, next) => {
+    app.use('/api', (req, res, next) => {
         req.db = pool;
         next();
     });
