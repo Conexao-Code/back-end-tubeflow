@@ -487,8 +487,9 @@ router.post('/videos/:id/comments', async (req, res) => {
       return res.status(400).json({ message: 'O ID do usuário e o tipo de usuário são obrigatórios.' });
     }
   
+    let connection;
     try {
-      const connection = await req.db.getConnection();
+      connection = await req.db.getConnection();
       console.log('Database connection established.');
   
       const userTable = userType === 'freelancer' ? 'freelancers' : 'users';
@@ -501,7 +502,6 @@ router.post('/videos/:id/comments', async (req, res) => {
       console.log(`User query result: ${JSON.stringify(userCheck)}`);
   
       if (userCheck.length === 0) {
-        connection.release();
         console.log(`User not found: ${userType} with ID ${userId}`);
         return res.status(400).json({ message: `O ${userType} com ID ${userId} não existe.` });
       }
@@ -510,9 +510,9 @@ router.post('/videos/:id/comments', async (req, res) => {
       const userRole = userCheck[0].role;
       console.log(`User found: name=${userName}, role=${userRole}`);
   
-      const columns = ['video_id', 'user_type', 'text', 'created_at'];
-      const values = [id, userType, text, new Date()];
-      let placeholders = '?, ?, ?, ?';
+      const columns = ['video_id', 'user_type', 'text', 'created_at', 'comment'];
+      const values = [id, userType, text, new Date(), text];
+      let placeholders = '?, ?, ?, ?, ?';
   
       if (userType === 'freelancer') {
         columns.push('freelancer_id');
@@ -528,7 +528,6 @@ router.post('/videos/:id/comments', async (req, res) => {
       console.log(`Executing query: ${query} with values: ${JSON.stringify(values)}`);
   
       await connection.query(query, values);
-      connection.release();
       console.log('Comment inserted successfully.');
   
       res.status(201).json({
@@ -542,8 +541,14 @@ router.post('/videos/:id/comments', async (req, res) => {
     } catch (error) {
       console.error('Erro ao adicionar comentário:', error);
       res.status(500).json({ message: 'Erro ao adicionar comentário.' });
+    } finally {
+      if (connection) {
+        connection.release();
+        console.log('Database connection released.');
+      }
     }
   });
+  
   
 
 
