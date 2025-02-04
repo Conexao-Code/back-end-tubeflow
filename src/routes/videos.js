@@ -476,71 +476,75 @@ router.put('/videos/:id/status', async (req, res) => {
 router.post('/videos/:id/comments', async (req, res) => {
     const { id } = req.params;
     const { text, userId, userType } = req.body;
-
+  
+    console.log(`Request received: videoId=${id}, userId=${userId}, userType=${userType}, text=${text}`);
+  
     if (!text) {
-        return res.status(400).json({ message: 'O texto do comentário é obrigatório.' });
+      return res.status(400).json({ message: 'O texto do comentário é obrigatório.' });
     }
-
+  
     if (!userId || !userType) {
-        return res.status(400).json({ message: 'O ID do usuário e o tipo de usuário são obrigatórios.' });
+      return res.status(400).json({ message: 'O ID do usuário e o tipo de usuário são obrigatórios.' });
     }
-
+  
     try {
-        const connection = await req.db.getConnection();
-
-        // Determine a tabela correta com base no tipo de usuário
-        const userTable = userType === 'freelancer' ? 'freelancers' : 'users';
-        const [userCheck] = await connection.query(
-            `SELECT id, name, role FROM ${userTable} WHERE id = ?`,
-            [userId]
-        );
-
-        // Verifique se o usuário existe
-        if (userCheck.length === 0) {
-            connection.release();
-            return res.status(400).json({ message: `O ${userType} com ID ${userId} não existe.` });
-        }
-
-        // Pegue os detalhes do usuário
-        const userName = userCheck[0].name;
-        const userRole = userCheck[0].role;
-
-        // Monte a consulta dinâmica para permitir NULL em user_id ou freelancer_id
-        const columns = ['video_id', 'user_type', 'text', 'created_at'];
-        const values = [id, userType, text, new Date()];
-        let placeholders = '?, ?, ?, ?';
-
-        if (userType === 'freelancer') {
-            columns.push('freelancer_id');
-            values.push(userId);
-            placeholders += ', ?';
-        } else {
-            columns.push('user_id');
-            values.push(userId);
-            placeholders += ', ?';
-        }
-
-        // Insira o comentário
-        const query = `INSERT INTO comments (${columns.join(', ')}) VALUES (${placeholders})`;
-        await connection.query(query, values);
-
+      const connection = await req.db.getConnection();
+      console.log('Database connection established.');
+  
+      const userTable = userType === 'freelancer' ? 'freelancers' : 'users';
+      console.log(`Checking user existence in table: ${userTable}`);
+  
+      const [userCheck] = await connection.query(
+        `SELECT id, name, role FROM ${userTable} WHERE id = ?`,
+        [userId]
+      );
+      console.log(`User query result: ${JSON.stringify(userCheck)}`);
+  
+      if (userCheck.length === 0) {
         connection.release();
-
-        // Retorne a resposta com detalhes do comentário
-        res.status(201).json({
-            message: 'Comentário adicionado com sucesso.',
-            comment: {
-                text,
-                userName,
-                userRole,
-            },
-        });
+        console.log(`User not found: ${userType} with ID ${userId}`);
+        return res.status(400).json({ message: `O ${userType} com ID ${userId} não existe.` });
+      }
+  
+      const userName = userCheck[0].name;
+      const userRole = userCheck[0].role;
+      console.log(`User found: name=${userName}, role=${userRole}`);
+  
+      const columns = ['video_id', 'user_type', 'text', 'created_at'];
+      const values = [id, userType, text, new Date()];
+      let placeholders = '?, ?, ?, ?';
+  
+      if (userType === 'freelancer') {
+        columns.push('freelancer_id');
+        values.push(userId);
+        placeholders += ', ?';
+      } else {
+        columns.push('user_id');
+        values.push(userId);
+        placeholders += ', ?';
+      }
+  
+      const query = `INSERT INTO comments (${columns.join(', ')}) VALUES (${placeholders})`;
+      console.log(`Executing query: ${query} with values: ${JSON.stringify(values)}`);
+  
+      await connection.query(query, values);
+      connection.release();
+      console.log('Comment inserted successfully.');
+  
+      res.status(201).json({
+        message: 'Comentário adicionado com sucesso.',
+        comment: {
+          text,
+          userName,
+          userRole,
+        },
+      });
     } catch (error) {
-        console.error('Erro ao adicionar comentário:', error);
-        res.status(500).json({ message: 'Erro ao adicionar comentário.' });
+      console.error('Erro ao adicionar comentário:', error);
+      res.status(500).json({ message: 'Erro ao adicionar comentário.' });
     }
-});
-
+  });
+  
 
 
 router.get('/videos/:id/comments', async (req, res) => {
