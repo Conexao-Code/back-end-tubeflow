@@ -15,6 +15,7 @@ router.get('/channels', async (req, res) => {
                 SUM(CASE WHEN MONTH(v.created_at) = MONTH(NOW()) THEN 1 ELSE 0 END) AS monthlyVideos
             FROM channels c
             LEFT JOIN videos v ON v.channel_id = c.id
+            WHERE c.enabled = 1
             GROUP BY c.id
         `);
 
@@ -92,28 +93,40 @@ router.delete('/channels/:id', async (req, res) => {
     try {
         const connection = await req.db.getConnection();
 
+        // Excluir os logs de vídeo vinculados aos vídeos que não estão publicados
         await connection.query(`
             DELETE vl
             FROM video_logs vl
             INNER JOIN videos v ON vl.video_id = v.id
-            WHERE v.channel_id = ?
+            WHERE v.channel_id = ? AND v.status != 'Publicado'
         `, [id]);
 
-        await connection.query('DELETE FROM videos WHERE channel_id = ?', [id]);
+        // Excluir os vídeos que não estão publicados
+        await connection.query(`
+            DELETE FROM videos
+            WHERE channel_id = ? AND status != 'Publicado'
+        `, [id]);
 
-        const [result] = await connection.query('DELETE FROM channels WHERE id = ?', [id]);
+        // Em vez de excluir o canal, desabilita-o (para não aparecer no front-end)
+        const [result] = await connection.query(`
+            UPDATE channels
+            SET enabled = 0
+            WHERE id = ?
+        `, [id]);
+
         connection.release();
 
         if (result.affectedRows === 0) {
             return res.status(404).json({ message: 'Canal não encontrado.' });
         }
 
-        res.json({ message: 'Canal excluído com sucesso.' });
+        res.json({ message: 'Canal desabilitado com sucesso.' });
     } catch (error) {
         console.error('Erro ao excluir canal:', error);
         res.status(500).json({ message: 'Erro ao excluir canal.' });
     }
 });
+
 
 
 module.exports = router;
