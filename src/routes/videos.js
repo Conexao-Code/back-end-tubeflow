@@ -548,9 +548,6 @@ router.post('/videos/:id/comments', async (req, res) => {
       }
     }
   });
-  
-  
-
 
 router.get('/videos/:id/comments', async (req, res) => {
     const { id } = req.params;
