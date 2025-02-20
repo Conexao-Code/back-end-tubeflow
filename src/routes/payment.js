@@ -3,7 +3,7 @@ const router = express.Router();
 const mercadopago = require('mercadopago');
 
 mercadopago.configure({
-  access_token: process.env.MP_ACCESS_TOKEN
+  access_token: "TEST-124639488725733-022019-b62d2acb8e137c40629a18b9dc7571df-1254217648"
 });
 
 router.post('/create-payment', async (req, res) => {
@@ -81,11 +81,11 @@ router.post('/webhook', async (req, res) => {
     try {
       const signature = req.headers['x-signature'];
       if (!signature) return res.status(401).end();
-      
+      const MP_WEBHOOK_SECRET = "9dcee93ad0b999bc005ed723554e8f7cdd7021d036f1f043a39ee966af668dc3"
       // Validar assinatura
       const isValid = mercadopago.payment.validateWebhook(
         signature,
-        process.env.MP_WEBHOOK_SECRET
+        MP_WEBHOOK_SECRET
       );
   
       if (!isValid) return res.status(401).end();
