@@ -14,6 +14,7 @@ const Reports = require('./routes/reports');
 const Logs = require('./routes/logs');
 const Settings = require('./routes/settings');
 const Admin = require('./routes/admin');
+const Payment = require('./routes/payment');
 
 async function main() {
     const pool = await connect();
@@ -41,6 +42,7 @@ async function main() {
     app.use('/api', Logs);
     app.use('/api', Admin);
     app.use('/api', Reports);
+    app.use('/api', Payment);
 
     app.listen(port, async () => {
         console.log(`Servidor rodando na porta ${port}`);
