@@ -67,13 +67,12 @@ router.post('/register-freelancer', async (req, res) => {
     }
 });
 
-
 router.get('/freelancers', async (req, res) => {
     try {
         const connection = await req.db.getConnection();
 
         const [freelancers] = await connection.query(
-            'SELECT id, name, email, role, created_at AS createdAt, updated_at FROM freelancers'
+            'SELECT id, name, email, role, phone, created_at AS createdAt, updated_at FROM freelancers'
         );
 
         connection.release();

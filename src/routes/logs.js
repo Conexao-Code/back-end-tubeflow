@@ -137,7 +137,7 @@ router.get('/stats', async (req, res) => {
             SUM(duration) AS totalDuration,
             SUM(
               CASE 
-                WHEN to_status IN ('Roteiro_Concluído', 'Narração_Concluído', 'Edição_Concluído', 'Thumbnail_Concluída')
+                WHEN to_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
                 THEN 1 ELSE 0
               END
             ) AS tasksCompleted
