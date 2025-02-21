@@ -19,10 +19,22 @@ const Payment = require('./routes/payment');
 async function main() {
     const pool = await connect();
 
-    // 🔹 Permitir todas as origens temporariamente
+    // Configuração de CORS com origens permitidas
     app.use(cors({
-        origin: '*',
-        optionsSuccessStatus: 200
+        origin: function (origin, callback) {
+            // Adiciona a origem do front-end à lista de permitidas
+            const allAllowedOrigins = [...allowedOrigins, 'https://tubeflow.conexaocode.com'];
+            
+            // Permite requisições sem origem (como Postman) ou origens permitidas
+            if (!origin || allAllowedOrigins.includes(origin)) {
+                callback(null, true);
+            } else {
+                callback(new Error('Origem não permitida pelo CORS'));
+            }
+        },
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Métodos permitidos
+        allowedHeaders: ['Content-Type', 'Authorization'],     // Cabeçalhos permitidos
+        optionsSuccessStatus: 200                             // Resposta para requisições OPTIONS
     }));
 
     app.use(express.json());
@@ -32,6 +44,7 @@ async function main() {
         next();
     });
 
+    // Rotas
     app.use('/api', Login);
     app.use('/api', Cadastro);
     app.use('/api', RegisterFreelancer);
