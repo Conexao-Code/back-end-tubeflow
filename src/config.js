@@ -12,10 +12,10 @@ module.exports = {
     fetchInterval: 30 * 60 * 1000, 
     queueProcessInterval: 5000,
     port: 1100,
-    
     allowedOrigins: [
         'http://localhost:5173',
         'http://localhost:3001',
-        'http://77.37.43.248:3333'
+        'http://77.37.43.248:3333',
+        'https://tubeflow.conexaocode.com' // Adicionado
     ],
 };
