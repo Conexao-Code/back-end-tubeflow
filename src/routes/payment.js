@@ -4,7 +4,7 @@ const router = express.Router();
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
-const pool = require('./db'); // Configuração do PostgreSQL
+const pool = require('../config'); // Configuração do PostgreSQL
 
 // Configurações da API do Mercado Pago
 const MP_API_URL = 'https://api.mercadopago.com/v1';
