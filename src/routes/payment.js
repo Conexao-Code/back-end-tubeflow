@@ -1,169 +1,222 @@
+const express = require('express');
+const router = express.Router();
 const axios = require('axios');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
+const { body, validationResult } = require('express-validator');
+const rateLimit = require('express-rate-limit');
 
-const MP_API_URL = process.env.NODE_ENV === 'production' 
-    ? 'https://api.mercadopago.com' 
-    : 'https://api.mercadopago.com/sandbox';
+// Configurações
+const MP_API_URL = process.env.MP_API_URL || 'https://api.mercadopago.com/v1';
+const PIX_EXPIRATION = 15 * 60 * 1000; // 15 minutos
 
-const getCredentials = async (connection) => {
-    const [keys] = await connection.query(
-        `SELECT access_token, public_key, encrypted_private_key 
+// Rate Limiter Específico para Pagamentos
+const paymentLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: 'Muitas tentativas de pagamento. Tente novamente mais tarde.',
+  keyGenerator: (req) => req.ip + '-' + (req.body.user?.cpf || '')
+});
+
+// Validação de CPF
+const validateCPF = (cpf) => {
+  cpf = cpf.replace(/\D/g, '');
+  if (cpf.length !== 11 || !!cpf.match(/(\d)\1{10}/)) return false;
+  
+  const calculateDigit = (slice) => {
+    const sum = slice.split('')
+      .map((num, idx) => parseInt(num) * (slice.length + 1 - idx))
+      .reduce((a, b) => a + b);
+    
+    const remainder = 11 - (sum % 11);
+    return remainder > 9 ? 0 : remainder;
+  };
+
+  return calculateDigit(cpf.slice(0,9)) === parseInt(cpf[9]) && 
+         calculateDigit(cpf.slice(0,10)) === parseInt(cpf[10]);
+};
+
+// Criptografia Segura
+const encryptData = (text) => {
+  const iv = crypto.randomBytes(16);
+  const cipher = crypto.createCipheriv('aes-256-gcm', Buffer.from(process.env.ENCRYPTION_KEY), iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  return {
+    iv: iv.toString('hex'),
+    content: encrypted,
+    tag: cipher.getAuthTag().toString('hex')
+  };
+};
+
+router.post('/create-pix-payment', 
+  paymentLimiter,
+  [
+    body('amount').isFloat({ min: 1 }).toFloat(),
+    body('user.cpf').custom(validateCPF),
+    body('user.email').isEmail().normalizeEmail(),
+    body('user.name').trim().escape().isLength({ min: 5 })
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const connection = await req.db.getConnection();
+    try {
+      const { amount, user } = req.body;
+      
+      // Verificar duplicatas
+      const [existing] = await connection.query(
+        `SELECT id FROM payments 
+         WHERE user_id = ? AND status = 'pending' 
+         AND created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)`,
+        [user.id]
+      );
+      
+      if (existing.length > 0) {
+        return res.status(429).json({ error: 'Pagamento pendente já existe' });
+      }
+
+      // Obter credenciais com segurança
+      const [credentials] = await connection.query(
+        `SELECT access_token, public_key 
          FROM api_keys 
          WHERE environment = ? 
          LIMIT 1`,
         [process.env.NODE_ENV || 'sandbox']
-    );
-    
-    // Decriptografar chave privada
-    const decipher = crypto.createDecipheriv('aes-256-cbc', 
-        process.env.ENCRYPTION_KEY, 
-        Buffer.from(keys[0].encrypted_private_key.iv, 'hex')
-    );
-    let decryptedKey = decipher.update(keys[0].encrypted_private_key.data, 'hex', 'utf8');
-    decryptedKey += decipher.final('utf8');
-    
-    return {
-        accessToken: keys[0].access_token,
-        publicKey: keys[0].public_key,
-        privateKey: decryptedKey
-    };
-};
+      );
 
-router.post('/create-pix-payment', rateLimit, async (req, res) => {
-    const connection = await req.db.getConnection();
-    try {
-        const { amount, user } = req.body;
-        
-        // Validação
-        if (!amount || amount < 1 || !user || !user.cpf || !user.name) {
-            return res.status(400).json({ error: 'Dados inválidos' });
-        }
+      // Dados de pagamento
+      const paymentId = uuidv4();
+      const payload = {
+        transaction_amount: amount,
+        payment_method_id: 'pix',
+        payer: {
+          email: user.email,
+          identification: {
+            type: 'CPF',
+            number: user.cpf.replace(/\D/g, '')
+          }
+        },
+        notification_url: `${process.env.API_BASE_URL}/payment/webhook`,
+        additional_info: {
+          items: [{
+            id: 'subscription',
+            title: 'Assinatura Premium',
+            quantity: 1,
+            unit_price: amount
+          }]
+        },
+        external_reference: paymentId,
+        date_of_expiration: new Date(Date.now() + PIX_EXPIRATION).toISOString()
+      };
 
-        // Obter credenciais seguras
-        const credentials = await getCredentials(connection);
-        
-        // Gerar payload para Mercado Pago
-        const paymentData = {
-            transaction_amount: Number(amount),
-            payment_method_id: 'pix',
-            payer: {
-                email: user.email,
-                first_name: user.name.split(' ')[0],
-                last_name: user.name.split(' ').slice(1).join(' '),
-                identification: {
-                    type: 'CPF',
-                    number: user.cpf.replace(/\D/g, '')
-                }
-            },
-            notification_url: `${process.env.API_BASE_URL}/payment/webhook`,
-            additional_info: {
-                items: [{
-                    id: 'subscription',
-                    title: 'Assinatura Premium',
-                    quantity: 1,
-                    unit_price: Number(amount)
-                }]
-            }
-        };
+      // Chamada segura à API do Mercado Pago
+      const response = await axios.post(`${MP_API_URL}/payments`, payload, {
+        headers: {
+          'Authorization': `Bearer ${credentials[0].access_token}`,
+          'Content-Type': 'application/json',
+          'X-Idempotency-Key': crypto.createHash('sha256').update(paymentId).digest('hex')
+        },
+        timeout: 10000
+      });
 
-        // Criar pagamento no Mercado Pago
-        const response = await axios.post(`${MP_API_URL}/v1/payments`, paymentData, {
-            headers: {
-                'Authorization': `Bearer ${credentials.accessToken}`,
-                'Content-Type': 'application/json',
-                'X-Idempotency-Key': uuidv4() // Prevenção de requisições duplicadas
-            }
-        });
+      // Armazenamento seguro
+      const encryptedCPF = encryptData(user.cpf);
+      await connection.query(
+        `INSERT INTO payments 
+         (mp_payment_id, user_id, amount, pix_data, status, encrypted_cpf)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          response.data.id,
+          user.id,
+          amount,
+          JSON.stringify(response.data.point_of_interaction.transaction_data),
+          'pending',
+          encryptedCPF
+        ]
+      );
 
-        // Registrar pagamento no banco
-        await connection.query(
-            `INSERT INTO payments 
-             (mp_payment_id, user_id, amount, pix_code, pix_qr_code, expiration_date, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-                response.data.id,
-                user.id,
-                amount,
-                response.data.point_of_interaction.transaction_data.qr_code,
-                response.data.point_of_interaction.transaction_data.qr_code_base64,
-                new Date(response.data.date_of_expiration),
-                'pending'
-            ]
-        );
+      // Resposta sanitizada
+      const responseData = {
+        paymentId: response.data.id,
+        qrCode: response.data.point_of_interaction.transaction_data.qr_code,
+        expires: response.data.date_of_expiration
+      };
 
-        res.json({
-            paymentId: response.data.id,
-            qrCode: response.data.point_of_interaction.transaction_data.qr_code,
-            qrCodeBase64: response.data.point_of_interaction.transaction_data.qr_code_base64,
-            expiration: response.data.date_of_expiration
-        });
+      res.json(responseData);
 
     } catch (error) {
-        console.error('Erro na criação do PIX:', error.response?.data || error.message);
-        
-        // Log de erros detalhado
-        await connection.query(
-            `INSERT INTO payment_errors 
-             (user_id, error_code, error_message, request_data)
-             VALUES (?, ?, ?, ?)`,
-            [user?.id, error.response?.status, error.message, JSON.stringify(req.body)]
-        );
+      // Log seguro de erros
+      await connection.query(
+        `INSERT INTO security_logs 
+         (event_type, ip_address, user_agent, metadata)
+         VALUES (?, ?, ?, ?)`,
+        ['payment_error', req.ip, req.get('User-Agent'), JSON.stringify({
+          error: error.message,
+          code: error.response?.status
+        })]
+      );
 
-        res.status(500).json({ 
-            error: 'Erro ao processar pagamento',
-            code: error.response?.status 
-        });
+      res.status(500).json({ 
+        error: 'Erro no processamento do pagamento',
+        code: 'INTERNAL_ERROR'
+      });
     } finally {
-        connection.release();
+      connection.release();
     }
-});
+  }
+);
 
-// Webhook para atualizações de status
-router.post('/payment/webhook', async (req, res) => {
+router.post('/payment/webhook', 
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
     try {
-        // Verificar assinatura
-        const signature = req.headers['x-signature'];
-        const payload = req.body;
-        
-        const hash = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET)
-                          .update(JSON.stringify(payload))
-                          .digest('hex');
-                          
-        if (hash !== signature) {
-            return res.status(401).send('Assinatura inválida');
-        }
+      // Verificação HMAC
+      const signature = req.headers['x-signature'];
+      const hmac = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET);
+      const digest = hmac.update(req.body).digest('hex');
+      
+      if (!crypto.timingSafeEqual(Buffer.from(digest), Buffer.from(signature))) {
+        return res.status(401).send('Assinatura inválida');
+      }
 
-        const connection = await req.db.getConnection();
-        
-        // Atualizar status do pagamento
+      const payload = JSON.parse(req.body.toString());
+      const connection = await req.db.getConnection();
+      
+      // Atualização transacional
+      await connection.beginTransaction();
+      try {
         await connection.query(
-            `UPDATE payments 
-             SET status = ?, updated_at = NOW()
-             WHERE mp_payment_id = ?`,
-            [payload.action === 'payment.updated' ? payload.data.status : 'cancelled', 
-             payload.data.id]
+          `UPDATE payments 
+           SET status = ?, updated_at = NOW()
+           WHERE mp_payment_id = ?`,
+          [payload.data.status, payload.data.id]
         );
 
-        // Lógica adicional para status aprovado
         if (payload.data.status === 'approved') {
-            await connection.query(
-                `UPDATE users 
-                 SET premium_status = 'active', 
-                     premium_expiration = DATE_ADD(NOW(), INTERVAL 1 MONTH)
-                 WHERE id = (
-                     SELECT user_id FROM payments 
-                     WHERE mp_payment_id = ?
-                 )`,
-                [payload.data.id]
-            );
+          await connection.query(
+            `UPDATE users 
+             SET premium_status = 'active',
+                 premium_expires = DATE_ADD(NOW(), INTERVAL 1 MONTH)
+             WHERE id = ?`,
+            [payload.data.metadata.user_id]
+          );
         }
-
-        connection.release();
-        res.sendStatus(200);
         
+        await connection.commit();
+        res.sendStatus(200);
+      } catch (transactionError) {
+        await connection.rollback();
+        throw transactionError;
+      }
     } catch (error) {
-        console.error('Erro no webhook:', error);
-        res.status(500).send('Erro interno');
+      console.error('Webhook Error:', error);
+      res.status(400).send('Requisição inválida');
     }
-});
+  }
+);
+
+module.exports = router;
