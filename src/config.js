@@ -3,8 +3,8 @@ require('dotenv').config();
 
 module.exports = {
     dbConfig: {
-        dbType: process.env.DB_TYPE || 'postgres', // Padrão para PostgreSQL
-        mysql: { // Configuração mantida para compatibilidade
+        dbType: process.env.DB_TYPE || 'postgres',
+        mysql: {
             host: process.env.MYSQL_HOST || "77.37.43.248",
             port: process.env.MYSQL_PORT || 3306,
             user: process.env.MYSQL_USER || "tubeflow",
@@ -15,13 +15,13 @@ module.exports = {
             queueLimit: 0,
             ssl: process.env.MYSQL_SSL ? { rejectUnauthorized: false } : null
         },
-        postgres: { // Nova configuração específica para PostgreSQL
+        postgres: {
             connectionString: process.env.DATABASE_URL || 'postgresql://tubeflow:tubeflow@145.223.29.205:5432/tubeflow',
-            ssl: {
-                rejectUnauthorized: false, // Necessário para conexões externas
-                ca: process.env.PG_SSL_CA // Adicione certificado CA se necessário
-            },
-            max: parseInt(process.env.PG_POOL_SIZE) || 10, // Tamanho do pool
+            ssl: process.env.DB_SSL === 'true' ? {
+                rejectUnauthorized: false,
+                ca: process.env.PG_SSL_CA
+            } : false,
+            max: parseInt(process.env.PG_POOL_SIZE) || 10,
             idleTimeoutMillis: 30000,
             connectionTimeoutMillis: 2000
         }
@@ -35,13 +35,12 @@ module.exports = {
         'http://localhost:5173',
         'http://localhost:3001',
         'http://77.37.43.248:3333',
-        process.env.CORS_ORIGIN // Adicione origens extras via variável de ambiente
+        process.env.CORS_ORIGIN
     ].filter(Boolean),
     
-    // Novas configurações específicas para PostgreSQL
     postgresSettings: {
         schema: process.env.PG_SCHEMA || 'public',
-        statementTimeout: 5000, // 5 segundos
-        query_timeout: 10000 // 10 segundos
+        statementTimeout: 5000,
+        query_timeout: 10000
     }
 };

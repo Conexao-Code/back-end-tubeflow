@@ -19,7 +19,6 @@ const Payment = require('./routes/payment');
 async function main() {
     const pool = await connect();
 
-    // 🔹 Permitir todas as origens temporariamente
     app.use(cors({
         origin: '*',
         optionsSuccessStatus: 200
