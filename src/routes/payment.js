@@ -5,10 +5,17 @@ const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 
+const PLAN_TYPES = {
+  MONTHLY: 'monthly',
+  QUARTERLY: 'quarterly',
+  ANNUAL: 'annual'
+};
+
+
 // Configurações da API do Mercado Pago
 const MP_API_URL = 'https://api.mercadopago.com/v1';
-const MP_ACCESS_TOKEN = process.env.MERCADOPAGO_ACCESS_TOKEN;
-const MP_WEBHOOK_SECRET = process.env.MP_WEBHOOK_SECRET;
+const MP_ACCESS_TOKEN = "TEST-124639488725733-022019-b62d2acb8e137c40629a18b9dc7571df-1254217648";
+const MP_WEBHOOK_SECRET = "9dcee93ad0b999bc005ed723554e8f7cdd7021d036f1f043a39ee966af668dc3";
 
 const mpHeaders = {
   'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
@@ -21,44 +28,41 @@ router.post('/create-payment', async (req, res) => {
     const { paymentMethod, plan, userData } = req.body;
     const pool = req.db;
 
-    // Validação dos dados recebidos
     if (!validatePaymentData(req.body)) {
       return res.status(400).json({
         error: 'Dados inválidos',
-        message: 'Verifique os campos obrigatórios e formatos (CPF, email, valores numéricos)'
+        message: 'Verifique os campos obrigatórios (CPF, email, tipo de plano)'
       });
     }
 
-    // Validação do preço do plano
-    if (!validatePlanPrice(plan)) {
-      return res.status(400).json({
-        error: 'Valor do plano inválido',
-        validValues: { mensal: 97.00, anual: 997.00 }
-      });
-    }
+    const dbPlan = await getPlanFromDatabase(pool, plan.type);
+    
+    const validatedPlan = {
+      type: plan.type,
+      price: dbPlan.price,
+      duration: dbPlan.duration_months,
+      label: dbPlan.name,
+      period: getPlanPeriod(dbPlan.duration_months)
+    };
 
-    // Processamento para pagamentos PIX
     if (paymentMethod === 'pix') {
-      return await handlePixPayment(pool, res, plan, userData);
+      return await handlePixPayment(pool, res, validatedPlan, userData);
     }
 
-    // Resposta para métodos não implementados
     return res.status(400).json({
       error: 'Método de pagamento não suportado',
       supportedMethods: ['pix']
     });
 
   } catch (error) {
-    console.error('Erro no processamento do pagamento:', {
-      message: error.message,
-      stack: error.stack,
-      responseData: error.response?.data
-    });
+    console.error('Erro no processamento do pagamento:', error);
 
-    return res.status(500).json({
-      error: 'Erro interno no processamento do pagamento',
-      details: error.response?.data?.error || error.message,
-      referenceId: uuidv4()
+    const statusCode = error.message.includes('Plano') ? 400 : 500;
+    return res.status(statusCode).json({
+      error: error.message.includes('Plano') 
+        ? error.message 
+        : 'Erro interno no processamento do pagamento',
+      details: error.response?.data?.error || error.message
     });
   }
 });
@@ -68,63 +72,55 @@ router.post('/pix/webhook', express.json(), async (req, res) => {
   try {
     const pool = req.db;
 
-    // Verificação de segurança do webhook
     if (!verifyWebhookSignature(req)) {
-      console.warn('Tentativa de acesso não autorizado ao webhook', {
-        headers: req.headers,
-        body: req.body
-      });
-      return res.status(403).json({
-        error: 'Acesso não autorizado',
-        code: 'INVALID_SIGNATURE'
-      });
+      return res.status(403).json({ error: 'Acesso não autorizado' });
     }
 
-    // Extração do ID do pagamento
     const paymentId = req.body.data?.id;
-    if (!paymentId) {
-      return res.status(400).json({
-        error: 'ID de pagamento ausente na requisição',
-        code: 'MISSING_PAYMENT_ID'
-      });
-    }
+    if (!paymentId) return res.status(400).json({ error: 'ID de pagamento ausente' });
 
-    // Obter detalhes atualizados do pagamento
     const paymentInfo = await getPaymentDetails(paymentId);
-    
-    // Atualização do status no banco de dados
     await updatePaymentStatus(pool, paymentInfo);
 
-    // Ativação da assinatura se pagamento aprovado
     if (paymentInfo.status === 'approved') {
       await activateSubscription(pool, paymentInfo);
-      console.log(`Assinatura ativada para pagamento ID: ${paymentInfo.id}`);
     }
 
-    return res.status(200).json({
-      status: 'success',
-      message: 'Webhook processado com sucesso'
-    });
+    return res.json({ status: 'success' });
 
   } catch (error) {
-    console.error('Erro crítico no processamento do webhook:', {
-      message: error.message,
-      stack: error.stack,
-      paymentId: req.body.data?.id
-    });
-
-    return res.status(500).json({
-      error: 'Erro interno no processamento do webhook',
-      referenceId: uuidv4()
-    });
+    console.error('Erro no webhook:', error);
+    return res.status(500).json({ error: 'Erro interno' });
   }
 });
+
+async function getPlanFromDatabase(pool, planType) {
+  const result = await pool.query(
+    `SELECT * FROM plans 
+     WHERE LOWER(name) = LOWER($1)`,
+    [planType]
+  );
+
+  if (!result.rows.length) {
+    throw new Error('Plano não encontrado');
+  }
+
+  return result.rows[0];
+}
+
+function getPlanPeriod(durationMonths) {
+  const periods = {
+    1: 'monthly',
+    3: 'quarterly',
+    12: 'annual'
+  };
+  return periods[durationMonths] || 'custom';
+}
 
 // Função para tratamento de pagamentos PIX
 async function handlePixPayment(pool, res, plan, userData) {
   const externalReference = uuidv4();
   
-  // Construção do payload para API do Mercado Pago
   const paymentPayload = {
     transaction_amount: plan.price,
     payment_method_id: 'pix',
@@ -144,7 +140,6 @@ async function handlePixPayment(pool, res, plan, userData) {
   };
 
   try {
-    // Chamada para API do Mercado Pago
     const mpResponse = await axios.post(`${MP_API_URL}/payments`, paymentPayload, {
       headers: mpHeaders,
       timeout: 10000
@@ -152,7 +147,6 @@ async function handlePixPayment(pool, res, plan, userData) {
 
     const pixData = mpResponse.data.point_of_interaction.transaction_data;
 
-    // Registro do pagamento no banco de dados
     const dbPayment = await registerPayment(pool, {
       external_reference: externalReference,
       mercadopago_id: mpResponse.data.id,
@@ -163,26 +157,20 @@ async function handlePixPayment(pool, res, plan, userData) {
       user_cpf: userData.cpf,
       qr_code: pixData.qr_code,
       qr_code_base64: pixData.qr_code_base64,
-      expiration: pixData.date_of_expiration
+      expiration: pixData.date_of_expiration,
+      plan_type: plan.type
     });
 
-    // Resposta de sucesso
     return res.json({
       paymentId: dbPayment.id,
       qrCode: pixData.qr_code,
       qrCodeBase64: pixData.qr_code_base64,
-      expires: pixData.date_of_expiration,
-      merchantMessage: pixData.ticket_url ? `Pagamento disponível em: ${pixData.ticket_url}` : 'Gerado via API'
+      expires: pixData.date_of_expiration
     });
 
   } catch (error) {
-    console.error('Falha na integração com Mercado Pago:', {
-      errorDetails: error.response?.data,
-      statusCode: error.response?.status,
-      requestData: paymentPayload
-    });
-
-    throw new Error(`Falha na comunicação com o gateway de pagamento: ${error.message}`);
+    console.error('Erro no Mercado Pago:', error.response?.data);
+    throw new Error('Falha na comunicação com o gateway de pagamento');
   }
 }
 
@@ -193,14 +181,11 @@ function validatePaymentData(data) {
 
   return (
     data.plan &&
-    data.plan.price &&
+    data.plan.type &&
+    Object.values(PLAN_TYPES).includes(data.plan.type) &&
     data.userData &&
-    data.userData.cpf &&
     cpfRegex.test(data.userData.cpf) &&
-    data.userData.email &&
-    emailRegex.test(data.userData.email) &&
-    typeof data.plan.price === 'number' &&
-    !isNaN(data.plan.price)
+    emailRegex.test(data.userData.email)
   );
 }
 
@@ -259,48 +244,85 @@ async function getPaymentDetails(paymentId) {
 
 // Função de registro do pagamento no banco de dados
 async function registerPayment(pool, paymentData) {
-  try {
-    const queryText = `
-      INSERT INTO payments (
-        external_reference, 
-        mercadopago_id, 
-        amount, 
-        status, 
-        payment_method, 
-        user_email, 
-        user_cpf, 
-        qr_code, 
-        qr_code_base64, 
-        expiration,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-      RETURNING *`;
+  const queryText = `
+    INSERT INTO payments (
+      external_reference, 
+      mercadopago_id, 
+      amount, 
+      status, 
+      payment_method, 
+      user_email, 
+      user_cpf, 
+      qr_code, 
+      qr_code_base64, 
+      expiration,
+      plan_type,
+      created_at,
+      updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
+    RETURNING *`;
 
-    const queryValues = [
-      paymentData.external_reference,
-      paymentData.mercadopago_id,
-      paymentData.amount,
-      paymentData.status,
-      paymentData.payment_method,
-      paymentData.user_email,
-      paymentData.user_cpf,
-      paymentData.qr_code,
-      paymentData.qr_code_base64,
-      paymentData.expiration
-    ];
+  const result = await pool.query(queryText, [
+    paymentData.external_reference,
+    paymentData.mercadopago_id,
+    paymentData.amount,
+    paymentData.status,
+    paymentData.payment_method,
+    paymentData.user_email,
+    paymentData.user_cpf,
+    paymentData.qr_code,
+    paymentData.qr_code_base64,
+    paymentData.expiration,
+    paymentData.plan_type
+  ]);
 
-    const result = await pool.query(queryText, queryValues);
-    return result.rows[0];
+  return result.rows[0];
+}
 
-  } catch (error) {
-    console.error('Erro no registro do pagamento:', {
-      error: error.message,
-      code: error.code,
-      query: error.query
-    });
-    throw new Error(`Falha no registro do pagamento: ${error.message}`);
+async function activateSubscription(pool, paymentInfo) {
+  const paymentQuery = await pool.query(
+    `SELECT p.*, pl.duration_months 
+     FROM payments p
+     JOIN plans pl ON p.plan_type = pl.name
+     WHERE p.mercadopago_id = $1`,
+    [paymentInfo.id]
+  );
+
+  if (!paymentQuery.rowCount) {
+    throw new Error('Pagamento não encontrado');
   }
+
+  const payment = paymentQuery.rows[0];
+  const startDate = new Date();
+  const endDate = new Date(startDate);
+  endDate.setMonth(startDate.getMonth() + payment.duration_months);
+
+  const subscriptionQuery = `
+    INSERT INTO subscriptions (
+      payment_id,
+      user_email,
+      plan_type,
+      start_date,
+      end_date,
+      active,
+      created_at,
+      updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+    ON CONFLICT (user_email) 
+    DO UPDATE SET
+      plan_type = EXCLUDED.plan_type,
+      end_date = EXCLUDED.end_date,
+      active = EXCLUDED.active,
+      updated_at = NOW()`;
+
+  await pool.query(subscriptionQuery, [
+    payment.id,
+    payment.user_email,
+    payment.plan_type,
+    startDate,
+    endDate,
+    true
+  ]);
 }
 
 // Atualização do status do pagamento
