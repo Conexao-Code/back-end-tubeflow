@@ -62,7 +62,7 @@ router.post('/create-payment', async (req, res) => {
       });
     }
 
-    // Resposta com os dados do pagamento criado
+    res.header('Access-Control-Allow-Origin', allowedOrigins);
     res.json({
       paymentId: payment.id,
       ...(paymentMethod === 'pix' && {
