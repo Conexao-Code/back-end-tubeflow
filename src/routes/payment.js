@@ -1,144 +1,169 @@
-const express = require('express');
-const router = express.Router();
 const axios = require('axios');
 const crypto = require('crypto');
+const { v4: uuidv4 } = require('uuid');
 
-// Configuração do token de acesso e URL base da API
-const ACCESS_TOKEN = "TEST-124639488725733-022019-b62d2acb8e137c40629a18b9dc7571df-1254217648";
-const BASE_URL = "https://api.mercadopago.com/v1/payments";
-const MP_WEBHOOK_SECRET = "9dcee93ad0b999bc005ed723554e8f7cdd7021d036f1f043a39ee966af668dc3";
+const MP_API_URL = process.env.NODE_ENV === 'production' 
+    ? 'https://api.mercadopago.com' 
+    : 'https://api.mercadopago.com/sandbox';
 
-/**
- * Rota para criar um pagamento
- */
-router.post('/create-payment', async (req, res) => {
-  try {
-    const { paymentMethod, plan, userData } = req.body;
-
-    // Validação básica dos dados recebidos
-    if (!paymentMethod || !plan || !userData) {
-      return res.status(400).json({ error: 'Dados inválidos' });
-    }
-
-    // Estrutura dos dados do pagamento
-    const paymentData = {
-      transaction_amount: plan.price,
-      description: `Assinatura ${plan.label} - ${plan.period}`,
-      payment_method_id: paymentMethod,
-      payer: {
-        email: userData.email,
-        first_name: userData.name.split(' ')[0],
-        last_name: userData.name.split(' ')[1] || '',
-        identification: {
-          type: 'CPF',
-          number: userData.cpf.replace(/\D/g, '')
-        }
-      }
+const getCredentials = async (connection) => {
+    const [keys] = await connection.query(
+        `SELECT access_token, public_key, encrypted_private_key 
+         FROM api_keys 
+         WHERE environment = ? 
+         LIMIT 1`,
+        [process.env.NODE_ENV || 'sandbox']
+    );
+    
+    // Decriptografar chave privada
+    const decipher = crypto.createDecipheriv('aes-256-cbc', 
+        process.env.ENCRYPTION_KEY, 
+        Buffer.from(keys[0].encrypted_private_key.iv, 'hex')
+    );
+    let decryptedKey = decipher.update(keys[0].encrypted_private_key.data, 'hex', 'utf8');
+    decryptedKey += decipher.final('utf8');
+    
+    return {
+        accessToken: keys[0].access_token,
+        publicKey: keys[0].public_key,
+        privateKey: decryptedKey
     };
+};
 
-    // Configuração específica para pagamento via Pix
-    if (paymentMethod === 'pix') {
-      paymentData.payment_method_id = 'pix';
-      paymentData.transaction_details = {
-        financial_institution: ''
-      };
+router.post('/create-pix-payment', rateLimit, async (req, res) => {
+    const connection = await req.db.getConnection();
+    try {
+        const { amount, user } = req.body;
+        
+        // Validação
+        if (!amount || amount < 1 || !user || !user.cpf || !user.name) {
+            return res.status(400).json({ error: 'Dados inválidos' });
+        }
+
+        // Obter credenciais seguras
+        const credentials = await getCredentials(connection);
+        
+        // Gerar payload para Mercado Pago
+        const paymentData = {
+            transaction_amount: Number(amount),
+            payment_method_id: 'pix',
+            payer: {
+                email: user.email,
+                first_name: user.name.split(' ')[0],
+                last_name: user.name.split(' ').slice(1).join(' '),
+                identification: {
+                    type: 'CPF',
+                    number: user.cpf.replace(/\D/g, '')
+                }
+            },
+            notification_url: `${process.env.API_BASE_URL}/payment/webhook`,
+            additional_info: {
+                items: [{
+                    id: 'subscription',
+                    title: 'Assinatura Premium',
+                    quantity: 1,
+                    unit_price: Number(amount)
+                }]
+            }
+        };
+
+        // Criar pagamento no Mercado Pago
+        const response = await axios.post(`${MP_API_URL}/v1/payments`, paymentData, {
+            headers: {
+                'Authorization': `Bearer ${credentials.accessToken}`,
+                'Content-Type': 'application/json',
+                'X-Idempotency-Key': uuidv4() // Prevenção de requisições duplicadas
+            }
+        });
+
+        // Registrar pagamento no banco
+        await connection.query(
+            `INSERT INTO payments 
+             (mp_payment_id, user_id, amount, pix_code, pix_qr_code, expiration_date, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+                response.data.id,
+                user.id,
+                amount,
+                response.data.point_of_interaction.transaction_data.qr_code,
+                response.data.point_of_interaction.transaction_data.qr_code_base64,
+                new Date(response.data.date_of_expiration),
+                'pending'
+            ]
+        );
+
+        res.json({
+            paymentId: response.data.id,
+            qrCode: response.data.point_of_interaction.transaction_data.qr_code,
+            qrCodeBase64: response.data.point_of_interaction.transaction_data.qr_code_base64,
+            expiration: response.data.date_of_expiration
+        });
+
+    } catch (error) {
+        console.error('Erro na criação do PIX:', error.response?.data || error.message);
+        
+        // Log de erros detalhado
+        await connection.query(
+            `INSERT INTO payment_errors 
+             (user_id, error_code, error_message, request_data)
+             VALUES (?, ?, ?, ?)`,
+            [user?.id, error.response?.status, error.message, JSON.stringify(req.body)]
+        );
+
+        res.status(500).json({ 
+            error: 'Erro ao processar pagamento',
+            code: error.response?.status 
+        });
+    } finally {
+        connection.release();
     }
-
-    // Chamada à API do Mercado Pago para criar o pagamento
-    const response = await axios.post(BASE_URL, paymentData, {
-      headers: {
-        'Authorization': `Bearer ${ACCESS_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    const payment = response.data;
-
-    // Verifica se o pagamento foi rejeitado
-    if (payment.status === 'rejected') {
-      return res.status(400).json({
-        error: 'Pagamento recusado',
-        details: payment
-      });
-    }
-
-    res.header('Access-Control-Allow-Origin', allowedOrigins);
-    res.json({
-      paymentId: payment.id,
-      ...(paymentMethod === 'pix' && {
-        qrCode: payment.point_of_interaction?.transaction_data?.qr_code,
-        qrCodeBase64: payment.point_of_interaction?.transaction_data?.qr_code_base64,
-        expires: payment.date_of_expiration
-      })
-    });
-
-  } catch (error) {
-    console.error('Erro no pagamento:', error.response ? error.response.data : error.message);
-    res.status(500).json({
-      error: 'Erro ao processar pagamento',
-      details: error.response ? error.response.data : error.message
-    });
-  }
 });
 
-/**
- * Rota para consultar o status de um pagamento
- */
-router.get('/payment-status/:id', async (req, res) => {
-  try {
-    // Chamada à API do Mercado Pago para consultar o status
-    const response = await axios.get(`${BASE_URL}/${req.params.id}`, {
-      headers: {
-        'Authorization': `Bearer ${ACCESS_TOKEN}`
-      }
-    });
+// Webhook para atualizações de status
+router.post('/payment/webhook', async (req, res) => {
+    try {
+        // Verificar assinatura
+        const signature = req.headers['x-signature'];
+        const payload = req.body;
+        
+        const hash = crypto.createHmac('sha256', process.env.WEBHOOK_SECRET)
+                          .update(JSON.stringify(payload))
+                          .digest('hex');
+                          
+        if (hash !== signature) {
+            return res.status(401).send('Assinatura inválida');
+        }
 
-    res.json(response.data);
+        const connection = await req.db.getConnection();
+        
+        // Atualizar status do pagamento
+        await connection.query(
+            `UPDATE payments 
+             SET status = ?, updated_at = NOW()
+             WHERE mp_payment_id = ?`,
+            [payload.action === 'payment.updated' ? payload.data.status : 'cancelled', 
+             payload.data.id]
+        );
 
-  } catch (error) {
-    console.error('Erro ao verificar pagamento:', error.response ? error.response.data : error.message);
-    res.status(500).json({
-      error: 'Erro ao verificar status',
-      details: error.response ? error.response.data : error.message
-    });
-  }
-});
+        // Lógica adicional para status aprovado
+        if (payload.data.status === 'approved') {
+            await connection.query(
+                `UPDATE users 
+                 SET premium_status = 'active', 
+                     premium_expiration = DATE_ADD(NOW(), INTERVAL 1 MONTH)
+                 WHERE id = (
+                     SELECT user_id FROM payments 
+                     WHERE mp_payment_id = ?
+                 )`,
+                [payload.data.id]
+            );
+        }
 
-/**
- * Rota para receber notificações via webhook
- */
-router.post('/webhook', async (req, res) => {
-  try {
-    const signature = req.headers['x-signature'];
-    if (!signature) return res.status(401).end();
-
-    // Extrair timestamp e hash do header x-signature
-    const [tsPart, v1Part] = signature.split(',');
-    const timestamp = tsPart.split('=')[1];
-    const receivedHash = v1Part.split('=')[1];
-
-    // Gerar o HMAC-SHA256 esperado para validação
-    const rawBody = JSON.stringify(req.body);
-    const expectedHash = crypto
-      .createHmac('sha256', MP_WEBHOOK_SECRET)
-      .update(rawBody)
-      .digest('hex');
-
-    // Validar a assinatura
-    if (receivedHash !== expectedHash) {
-      console.error('Assinatura inválida');
-      return res.status(401).end();
+        connection.release();
+        res.sendStatus(200);
+        
+    } catch (error) {
+        console.error('Erro no webhook:', error);
+        res.status(500).send('Erro interno');
     }
-
-    const paymentId = req.body.data.id;
-    // Aqui você pode adicionar lógica para atualizar o status no banco de dados
-
-    res.status(200).end();
-
-  } catch (error) {
-    console.error('Erro no webhook:', error);
-    res.status(500).end();
-  }
 });
-
-module.exports = router;
