@@ -11,8 +11,6 @@ const PLAN_TYPES = {
   ANNUAL: 'annual'
 };
 
-
-// Configurações da API do Mercado Pago
 const MP_API_URL = 'https://api.mercadopago.com/v1';
 const MP_ACCESS_TOKEN = "TEST-124639488725733-022019-b62d2acb8e137c40629a18b9dc7571df-1254217648";
 const MP_WEBHOOK_SECRET = "9dcee93ad0b999bc005ed723554e8f7cdd7021d036f1f043a39ee966af668dc3";
@@ -22,7 +20,6 @@ const mpHeaders = {
   'Content-Type': 'application/json'
 };
 
-// Rota principal para criação de pagamentos
 router.post('/create-payment', async (req, res) => {
   try {
     const { paymentMethod, plan, userData } = req.body;
@@ -120,6 +117,13 @@ function getPlanPeriod(durationMonths) {
 // Função para tratamento de pagamentos PIX
 async function handlePixPayment(pool, res, plan, userData) {
   const externalReference = uuidv4();
+
+  if (!userData.cpf || userData.cpf.length !== 11) {
+    return res.status(400).json({
+      error: 'CPF inválido',
+      message: 'O CPF deve conter 11 dígitos numéricos'
+    });
+  }
   
   const paymentPayload = {
     transaction_amount: plan.price,
@@ -176,10 +180,10 @@ async function handlePixPayment(pool, res, plan, userData) {
 
 // Validação de dados do pagamento
 function validatePaymentData(data) {
-  const cpfRegex = /^\d{3}\.\d{3}\.\d{3}-\d{2}$/;
+  const cpfRegex = /^\d{11}$/; // Regex modificado
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  return (
+  const isValid = (
     data.plan &&
     data.plan.type &&
     Object.values(PLAN_TYPES).includes(data.plan.type) &&
@@ -187,6 +191,16 @@ function validatePaymentData(data) {
     cpfRegex.test(data.userData.cpf) &&
     emailRegex.test(data.userData.email)
   );
+
+  if (!isValid) {
+    console.log('Dados inválidos:', {
+      cpf: data.userData?.cpf,
+      email: data.userData?.email,
+      planType: data.plan?.type
+    });
+  }
+
+  return isValid;
 }
 
 // Validação dos valores dos planos
