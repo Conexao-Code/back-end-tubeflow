@@ -22,7 +22,8 @@ const MP_WEBHOOK_SECRET = "9dcee93ad0b999bc005ed723554e8f7cdd7021d036f1f043a39ee
 
 const mpHeaders = {
   'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
-  'Content-Type': 'application/json'
+  'Content-Type': 'application/json',
+  'X-Idempotency-Key': '' // Será preenchido dinamicamente
 };
 
 router.use((req, res, next) => {
@@ -39,7 +40,7 @@ router.post('/create-payment', async (req, res) => {
     console.log('Teste de conexão bem-sucedido:', testResult.rows[0].result === 2);
 
     const { paymentMethod, plan, userData } = req.body;
-    
+
     // Validações
     if (!plan || !plan.type) {
       return res.status(400).json({
@@ -57,7 +58,7 @@ router.post('/create-payment', async (req, res) => {
 
     // Busca o plano no banco
     const dbPlan = await getPlanFromDatabase(client, plan.type.toLowerCase());
-    
+
     const validatedPlan = {
       type: dbPlan.type,
       price: parseFloat(dbPlan.price), // Conversão explícita
@@ -123,7 +124,7 @@ async function getPlanFromDatabase(client, planType) {
     };
 
     const result = await client.query(query);
-    
+
     if (result.rows.length === 0) {
       throw new Error(`Plano '${planType}' não encontrado`);
     }
@@ -144,13 +145,10 @@ function getPlanPeriod(durationMonths) {
   return periods[durationMonths] || 'custom';
 }
 
-// Função para tratamento de pagamentos PIX
-// Função para tratamento de pagamentos PIX
 async function handlePixPayment(pool, res, plan, userData) {
   try {
     const externalReference = uuidv4();
 
-    // Validação do CPF
     if (!userData.cpf || userData.cpf.length !== 11) {
       return res.status(400).json({
         error: 'CPF inválido',
@@ -158,20 +156,17 @@ async function handlePixPayment(pool, res, plan, userData) {
       });
     }
 
-    // Conversão e validação do valor
     const transactionAmount = parseFloat(plan.price);
     if (isNaN(transactionAmount) || transactionAmount <= 0) {
       throw new Error(`Valor do plano inválido: ${plan.price}`);
     }
 
-    // Log de diagnóstico
     console.log('Dados numéricos convertidos:', {
       originalPrice: plan.price,
       convertedPrice: transactionAmount,
       type: typeof transactionAmount
     });
 
-    // Montagem do payload
     const paymentPayload = {
       transaction_amount: transactionAmount,
       payment_method_id: 'pix',
@@ -192,9 +187,16 @@ async function handlePixPayment(pool, res, plan, userData) {
 
     console.log('Payload enviado ao Mercado Pago:', JSON.stringify(paymentPayload, null, 2));
 
-    // Chamada à API do Mercado Pago
+    const idempotencyKey = externalReference; 
+
+    const requestHeaders = {
+      ...mpHeaders,
+      'X-Idempotency-Key': idempotencyKey
+    };
+
+    // Chamada corrigida:
     const mpResponse = await axios.post(`${MP_API_URL}/payments`, paymentPayload, {
-      headers: mpHeaders,
+      headers: requestHeaders, 
       timeout: 10000
     });
 
@@ -229,7 +231,7 @@ async function handlePixPayment(pool, res, plan, userData) {
       responseData: error.response?.data,
       stack: error.stack
     });
-    
+
     throw new Error('Falha na comunicação com o gateway de pagamento: ' + error.message);
   }
 }
