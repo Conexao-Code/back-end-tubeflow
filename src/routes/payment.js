@@ -145,80 +145,81 @@ function getPlanPeriod(durationMonths) {
   return periods[durationMonths] || 'custom';
 }
 
-async function handlePixPayment(user, paymentData, res) {
+async function handlePixPayment(userData, paymentData, res) {
   try {
-    // Validação do usuário
-    if (!user || !user.id) {
-      throw new Error('Usuário inválido para processamento de pagamento');
+    // Validação dos dados temporários do usuário
+    if (!userData || !userData.cpf || !userData.email) {
+      throw new Error('Dados do usuário incompletos para processamento de pagamento');
     }
+
+    // Gerar referência única para o pagamento
+    const externalReference = uuidv4();
 
     // Montagem do payload para Mercado Pago
     const payloadMP = {
-      transaction_amount: paymentData.transaction_amount,
+      transaction_amount: paymentData.price,
       payment_method_id: "pix",
       payer: {
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
+        email: userData.email,
+        first_name: userData.first_name || '',
+        last_name: userData.last_name || '',
         identification: {
           type: "CPF",
-          number: user.cpf
+          number: userData.cpf
         }
       },
-      notification_url: process.env.MP_WEBHOOK_URL,
-      description: paymentData.description,
-      external_reference: paymentData.external_reference,
-      date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString() // 30 minutos de expiração
+      notification_url: `${process.env.BASE_URL}/pix/webhook`,
+      description: `Assinatura ${paymentData.type} - ${paymentData.label}`,
+      external_reference: externalReference,
+      date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
     };
 
-    // Debug: Exibir payload
-    console.log('Payload enviado ao Mercado Pago:', JSON.stringify(payloadMP, null, 2));
-
     // Envio para API do Mercado Pago
-    const paymentResult = await mercadopago.payment.create(payloadMP);
+    const response = await axios.post(`${MP_API_URL}/payments`, payloadMP, {
+      headers: {
+        ...mpHeaders,
+        'X-Idempotency-Key': externalReference
+      }
+    });
 
-    // Extrair tipo de plano da descrição (assume formato "Texto - [plan_type]")
-    const planType = payloadMP.description.includes('-') 
-      ? payloadMP.description.split('-').pop().trim()
-      : 'unknown';
-
-    // Registro no banco de dados com plan_type
+    // Registrar pagamento com dados temporários
     const registeredPayment = await registerPayment(
-      user.id,
-      paymentResult.body.id,
-      payloadMP.transaction_amount,
-      'pending', // Status inicial
-      'pix', // Método de pagamento
-      payloadMP.external_reference,
-      planType // Novo campo adicionado
+      userData.email,
+      userData.cpf,
+      response.data.id,
+      paymentData.price,
+      'pending',
+      'pix',
+      externalReference,
+      paymentData.type
     );
 
     // Montagem da resposta
     const responseData = {
-      paymentId: paymentResult.body.id,
-      qrCode: paymentResult.body.point_of_interaction.transaction_data.qr_code,
-      qrCodeBase64: paymentResult.body.point_of_interaction.transaction_data.qr_code_base64,
-      paymentStatus: paymentResult.body.status,
-      planType: planType,
-      externalReference: payloadMP.external_reference
+      payment_id: response.data.id,
+      qr_code: response.data.point_of_interaction.transaction_data.qr_code,
+      qr_code_base64: response.data.point_of_interaction.transaction_data.qr_code_base64,
+      ticket_url: response.data.point_of_interaction.transaction_data.ticket_url,
+      expiration_date: response.data.date_of_expiration,
+      external_reference: externalReference
     };
 
-    console.log('Pagamento registrado com sucesso:', responseData);
+    console.log('Pagamento PIX criado com sucesso:', JSON.stringify(responseData, null, 2));
+    
     return res.status(200).json(responseData);
 
   } catch (error) {
-    console.error('Erro detalhado no Mercado Pago:', {
-      message: error.message,
-      responseData: error.body,
-      stack: error.stack
+    console.error('Erro detalhado no processamento PIX:', {
+      errorMessage: error.message,
+      stack: error.stack,
+      responseData: error.response?.data
     });
 
-    // Tratamento específico para erros de banco de dados
-    if (error.message.includes('column "plan_type"')) {
-      throw new Error(`Erro de configuração do banco de dados: ${error.message}`);
-    }
-
-    throw new Error(`Falha na comunicação com o gateway de pagamento: ${error.message}`);
+    const statusCode = error.response?.status || 500;
+    return res.status(statusCode).json({
+      error: 'Falha ao processar pagamento PIX',
+      details: error.response?.data || error.message
+    });
   }
 }
 
@@ -309,43 +310,56 @@ async function getPaymentDetails(paymentId) {
 
 // Função de registro do pagamento no banco de dados
 async function registerPayment(
-  userId,
+  tempEmail,
+  tempCpf,
   transactionId,
   amount,
   status,
   paymentMethod,
   externalReference,
-  planType // Novo parâmetro adicionado
+  planType
 ) {
   try {
-    const query = `
+    const queryText = `
       INSERT INTO payments (
-        user_id,
+        temp_email,
+        temp_cpf,
         transaction_id,
         amount,
         status,
         payment_method,
         external_reference,
-        plan_type, // Coluna adicionada
+        plan_type,
         created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
       RETURNING *`;
-    
+
     const values = [
-      userId,
+      tempEmail,
+      tempCpf,
       transactionId,
       amount,
       status,
       paymentMethod,
       externalReference,
-      planType // Novo valor adicionado
+      planType
     ];
 
-    const result = await pool.query(query, values);
+    const result = await pool.query(queryText, values);
+    
+    console.log('Pagamento registrado no banco:', JSON.stringify(result.rows[0], null, 2));
+    
     return result.rows[0];
+
   } catch (error) {
-    console.error('Erro ao registrar pagamento:', error);
-    throw new Error('Erro ao registrar pagamento no banco de dados');
+    console.error('Erro detalhado ao registrar pagamento:', {
+      errorMessage: error.message,
+      stack: error.stack,
+      query: queryText,
+      values: values
+    });
+    
+    throw new Error(`Falha ao registrar pagamento: ${error.message}`);
   }
 }
 
