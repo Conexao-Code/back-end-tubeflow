@@ -184,7 +184,7 @@ async function handlePixPayment(pool, res, plan, userData) {
           number: userData.cpf.replace(/\D/g, '')
         }
       },
-      notification_url: `${process.env.API_BASE_URL}/api/pix/webhook`,
+      notification_url: `${process.env.API_BASE_URL || 'https://apitubeflow.conexaocode.com'}/api/pix/webhook`,
       description: `Assinatura ${plan.label} - ${plan.period}`,
       external_reference: externalReference,
       date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
