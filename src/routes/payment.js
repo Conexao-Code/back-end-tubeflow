@@ -60,7 +60,7 @@ router.post('/create-payment', async (req, res) => {
     
     const validatedPlan = {
       type: dbPlan.type,
-      price: dbPlan.price,
+      price: parseFloat(dbPlan.price), // Conversão explícita
       duration: dbPlan.duration_months,
       label: dbPlan.description,
       period: getPlanPeriod(dbPlan.duration_months)
@@ -145,46 +145,67 @@ function getPlanPeriod(durationMonths) {
 }
 
 // Função para tratamento de pagamentos PIX
+// Função para tratamento de pagamentos PIX
 async function handlePixPayment(pool, res, plan, userData) {
-  const externalReference = uuidv4();
-
-  if (!userData.cpf || userData.cpf.length !== 11) {
-    return res.status(400).json({
-      error: 'CPF inválido',
-      message: 'O CPF deve conter 11 dígitos numéricos'
-    });
-  }
-
-  const paymentPayload = {
-    transaction_amount: plan.price,
-    payment_method_id: 'pix',
-    payer: {
-      email: userData.email,
-      first_name: userData.name.split(' ')[0],
-      last_name: userData.name.split(' ')[1] || '',
-      identification: {
-        type: 'CPF',
-        number: userData.cpf.replace(/\D/g, '')
-      }
-    },
-    notification_url: `${process.env.API_BASE_URL}/api/pix/webhook`,
-    description: `Assinatura ${plan.label} - ${plan.period}`,
-    external_reference: externalReference,
-    date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
-  };
-
   try {
+    const externalReference = uuidv4();
+
+    // Validação do CPF
+    if (!userData.cpf || userData.cpf.length !== 11) {
+      return res.status(400).json({
+        error: 'CPF inválido',
+        message: 'O CPF deve conter 11 dígitos numéricos'
+      });
+    }
+
+    // Conversão e validação do valor
+    const transactionAmount = parseFloat(plan.price);
+    if (isNaN(transactionAmount) || transactionAmount <= 0) {
+      throw new Error(`Valor do plano inválido: ${plan.price}`);
+    }
+
+    // Log de diagnóstico
+    console.log('Dados numéricos convertidos:', {
+      originalPrice: plan.price,
+      convertedPrice: transactionAmount,
+      type: typeof transactionAmount
+    });
+
+    // Montagem do payload
+    const paymentPayload = {
+      transaction_amount: transactionAmount,
+      payment_method_id: 'pix',
+      payer: {
+        email: userData.email,
+        first_name: userData.name.split(' ')[0] || '',
+        last_name: userData.name.split(' ').slice(1).join(' ') || '',
+        identification: {
+          type: 'CPF',
+          number: userData.cpf.replace(/\D/g, '')
+        }
+      },
+      notification_url: `${process.env.API_BASE_URL}/api/pix/webhook`,
+      description: `Assinatura ${plan.label} - ${plan.period}`,
+      external_reference: externalReference,
+      date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+    };
+
+    console.log('Payload enviado ao Mercado Pago:', JSON.stringify(paymentPayload, null, 2));
+
+    // Chamada à API do Mercado Pago
     const mpResponse = await axios.post(`${MP_API_URL}/payments`, paymentPayload, {
       headers: mpHeaders,
       timeout: 10000
     });
 
+    // Processamento da resposta
     const pixData = mpResponse.data.point_of_interaction.transaction_data;
 
+    // Registro do pagamento
     const dbPayment = await registerPayment(pool, {
       external_reference: externalReference,
       mercadopago_id: mpResponse.data.id,
-      amount: plan.price,
+      amount: transactionAmount, // Já convertido
       status: mpResponse.data.status,
       payment_method: 'pix',
       user_email: userData.email,
@@ -203,8 +224,13 @@ async function handlePixPayment(pool, res, plan, userData) {
     });
 
   } catch (error) {
-    console.error('Erro no Mercado Pago:', error.response?.data);
-    throw new Error('Falha na comunicação com o gateway de pagamento');
+    console.error('Erro detalhado no Mercado Pago:', {
+      message: error.message,
+      responseData: error.response?.data,
+      stack: error.stack
+    });
+    
+    throw new Error('Falha na comunicação com o gateway de pagamento: ' + error.message);
   }
 }
 
