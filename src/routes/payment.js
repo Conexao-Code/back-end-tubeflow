@@ -22,6 +22,9 @@ const mpHeaders = {
 
 router.post('/create-payment', async (req, res) => {
   try {
+    console.log('Testando conexão com o banco...');
+    const testConnection = await req.db.query('SELECT 1 + 1 AS result');
+    console.log('Conexão OK:', testConnection.rows[0].result === 2);
     console.log('Dados recebidos:', JSON.stringify(req.body, null, 2)); // Log de diagnóstico
 
     const { paymentMethod, plan, userData } = req.body;
@@ -101,17 +104,28 @@ router.post('/pix/webhook', express.json(), async (req, res) => {
 });
 
 async function getPlanFromDatabase(pool, planType) {
-  const result = await pool.query(
-    `SELECT * FROM plans 
-     WHERE LOWER(name) = LOWER($1)`,
-    [planType]
-  );
+  try {
+    const result = await pool.query(
+      `SELECT * FROM plans 
+       WHERE LOWER(type) = LOWER($1)`,
+      [planType]
+    );
 
-  if (!result.rows.length) {
-    throw new Error('Plano não encontrado');
+    if (!result.rows.length) {
+      console.error('Plano não encontrado para type:', planType);
+      throw new Error('Plano não encontrado');
+    }
+
+    console.log('Plano encontrado:', result.rows[0]);
+    return result.rows[0];
+
+  } catch (error) {
+    console.error('Erro no acesso ao banco:', {
+      query: `SELECT * FROM plans WHERE type = '${planType}'`,
+      error: error.message
+    });
+    throw error;
   }
-
-  return result.rows[0];
 }
 
 function getPlanPeriod(durationMonths) {
