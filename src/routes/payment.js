@@ -4,7 +4,7 @@ const { Pool } = require('pg');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
-const config = require('./config');
+const config = require('../config');
 
 // Configuração do pool PostgreSQL
 const pool = new Pool(config.dbConfig.postgres);
