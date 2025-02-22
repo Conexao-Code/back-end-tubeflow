@@ -1,10 +1,15 @@
-// paymentRoutes.js
 const express = require('express');
 const router = express.Router();
+const { Pool } = require('pg');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
+const config = require('./config');
 
+// Configuração do pool PostgreSQL
+const pool = new Pool(config.dbConfig.postgres);
+
+// Tipos de planos
 const PLAN_TYPES = {
   MONTHLY: 'monthly',
   QUARTERLY: 'quarterly',
@@ -20,16 +25,22 @@ const mpHeaders = {
   'Content-Type': 'application/json'
 };
 
+router.use((req, res, next) => {
+  req.db = pool;
+  next();
+});
+
 router.post('/create-payment', async (req, res) => {
+  let client;
   try {
-    console.log('Testando conexão com o banco...');
-    const testConnection = await req.db.query('SELECT 1 + 1 AS result');
-    console.log('Conexão OK:', testConnection.rows[0].result === 2);
-    console.log('Dados recebidos:', JSON.stringify(req.body, null, 2)); // Log de diagnóstico
+    // Verificação da conexão
+    client = await pool.connect();
+    const testResult = await client.query('SELECT 1 + 1 AS result');
+    console.log('Teste de conexão bem-sucedido:', testResult.rows[0].result === 2);
 
     const { paymentMethod, plan, userData } = req.body;
-    const pool = req.db;
-
+    
+    // Validações
     if (!plan || !plan.type) {
       return res.status(400).json({
         error: 'Plano inválido',
@@ -44,35 +55,36 @@ router.post('/create-payment', async (req, res) => {
       });
     }
 
-    const dbPlan = await getPlanFromDatabase(pool, plan.type);
-
+    // Busca o plano no banco
+    const dbPlan = await getPlanFromDatabase(client, plan.type.toLowerCase());
+    
     const validatedPlan = {
-      type: plan.type,
+      type: dbPlan.type,
       price: dbPlan.price,
       duration: dbPlan.duration_months,
-      label: dbPlan.name,
+      label: dbPlan.description,
       period: getPlanPeriod(dbPlan.duration_months)
     };
 
+    // Processa pagamento PIX
     if (paymentMethod === 'pix') {
-      return await handlePixPayment(pool, res, validatedPlan, userData);
+      return await handlePixPayment(client, res, validatedPlan, userData);
     }
 
     return res.status(400).json({
-      error: 'Método de pagamento não suportado',
+      error: 'Método não suportado',
       supportedMethods: ['pix']
     });
 
   } catch (error) {
-    console.error('Erro no processamento do pagamento:', error);
-
+    console.error('Erro no processamento:', error);
     const statusCode = error.message.includes('Plano') ? 400 : 500;
     return res.status(statusCode).json({
-      error: error.message.includes('Plano')
-        ? error.message
-        : 'Erro interno no processamento do pagamento',
-      details: error.response?.data?.error || error.message
+      error: error.message.includes('Plano') ? error.message : 'Erro interno',
+      details: error.response?.data || error.message
     });
+  } finally {
+    if (client) client.release();
   }
 });
 
@@ -103,27 +115,22 @@ router.post('/pix/webhook', express.json(), async (req, res) => {
   }
 });
 
-async function getPlanFromDatabase(pool, planType) {
+async function getPlanFromDatabase(client, planType) {
   try {
-    const result = await pool.query(
-      `SELECT * FROM plans 
-       WHERE LOWER(type) = LOWER($1)`,
-      [planType]
-    );
+    const query = {
+      text: 'SELECT * FROM plans WHERE LOWER(type) = $1',
+      values: [planType]
+    };
 
-    if (!result.rows.length) {
-      console.error('Plano não encontrado para type:', planType);
-      throw new Error('Plano não encontrado');
+    const result = await client.query(query);
+    
+    if (result.rows.length === 0) {
+      throw new Error(`Plano '${planType}' não encontrado`);
     }
 
-    console.log('Plano encontrado:', result.rows[0]);
     return result.rows[0];
-
   } catch (error) {
-    console.error('Erro no acesso ao banco:', {
-      query: `SELECT * FROM plans WHERE type = '${planType}'`,
-      error: error.message
-    });
+    console.error('Erro ao buscar plano:', error);
     throw error;
   }
 }
