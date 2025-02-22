@@ -22,8 +22,17 @@ const mpHeaders = {
 
 router.post('/create-payment', async (req, res) => {
   try {
+    console.log('Dados recebidos:', JSON.stringify(req.body, null, 2)); // Log de diagnóstico
+
     const { paymentMethod, plan, userData } = req.body;
     const pool = req.db;
+
+    if (!plan || !plan.type) {
+      return res.status(400).json({
+        error: 'Plano inválido',
+        message: 'Tipo de plano não especificado'
+      });
+    }
 
     if (!validatePaymentData(req.body)) {
       return res.status(400).json({
@@ -33,7 +42,7 @@ router.post('/create-payment', async (req, res) => {
     }
 
     const dbPlan = await getPlanFromDatabase(pool, plan.type);
-    
+
     const validatedPlan = {
       type: plan.type,
       price: dbPlan.price,
@@ -56,8 +65,8 @@ router.post('/create-payment', async (req, res) => {
 
     const statusCode = error.message.includes('Plano') ? 400 : 500;
     return res.status(statusCode).json({
-      error: error.message.includes('Plano') 
-        ? error.message 
+      error: error.message.includes('Plano')
+        ? error.message
         : 'Erro interno no processamento do pagamento',
       details: error.response?.data?.error || error.message
     });
@@ -124,7 +133,7 @@ async function handlePixPayment(pool, res, plan, userData) {
       message: 'O CPF deve conter 11 dígitos numéricos'
     });
   }
-  
+
   const paymentPayload = {
     transaction_amount: plan.price,
     payment_method_id: 'pix',
@@ -180,27 +189,34 @@ async function handlePixPayment(pool, res, plan, userData) {
 
 // Validação de dados do pagamento
 function validatePaymentData(data) {
-  const cpfRegex = /^\d{11}$/; // Regex modificado
+  const cpfRegex = /^\d{11}$/;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  const isValid = (
-    data.plan &&
-    data.plan.type &&
-    Object.values(PLAN_TYPES).includes(data.plan.type) &&
-    data.userData &&
-    cpfRegex.test(data.userData.cpf) &&
-    emailRegex.test(data.userData.email)
-  );
-
-  if (!isValid) {
-    console.log('Dados inválidos:', {
-      cpf: data.userData?.cpf,
-      email: data.userData?.email,
-      planType: data.plan?.type
-    });
+  // Verificação hierárquica com logs detalhados
+  if (!data.plan) {
+    console.error('Plano ausente:', data);
+    return false;
   }
 
-  return isValid;
+  if (!data.plan.type || !Object.values(PLAN_TYPES).includes(data.plan.type)) {
+    console.error('Tipo de plano inválido:', {
+      receivedType: data.plan.type,
+      validTypes: Object.values(PLAN_TYPES)
+    });
+    return false;
+  }
+
+  if (!data.userData?.cpf || !cpfRegex.test(data.userData.cpf)) {
+    console.error('CPF inválido:', data.userData?.cpf);
+    return false;
+  }
+
+  if (!data.userData?.email || !emailRegex.test(data.userData.email)) {
+    console.error('Email inválido:', data.userData?.email);
+    return false;
+  }
+
+  return true;
 }
 
 // Validação dos valores dos planos
