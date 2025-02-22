@@ -145,94 +145,80 @@ function getPlanPeriod(durationMonths) {
   return periods[durationMonths] || 'custom';
 }
 
-async function handlePixPayment(pool, res, plan, userData) {
+async function handlePixPayment(user, paymentData, res) {
   try {
-    const externalReference = uuidv4();
-
-    if (!userData.cpf || userData.cpf.length !== 11) {
-      return res.status(400).json({
-        error: 'CPF inválido',
-        message: 'O CPF deve conter 11 dígitos numéricos'
-      });
+    // Validação do usuário
+    if (!user || !user.id) {
+      throw new Error('Usuário inválido para processamento de pagamento');
     }
 
-    const transactionAmount = parseFloat(plan.price);
-    if (isNaN(transactionAmount) || transactionAmount <= 0) {
-      throw new Error(`Valor do plano inválido: ${plan.price}`);
-    }
-
-    console.log('Dados numéricos convertidos:', {
-      originalPrice: plan.price,
-      convertedPrice: transactionAmount,
-      type: typeof transactionAmount
-    });
-
-    const paymentPayload = {
-      transaction_amount: transactionAmount,
-      payment_method_id: 'pix',
+    // Montagem do payload para Mercado Pago
+    const payloadMP = {
+      transaction_amount: paymentData.transaction_amount,
+      payment_method_id: "pix",
       payer: {
-        email: userData.email,
-        first_name: userData.name.split(' ')[0] || '',
-        last_name: userData.name.split(' ').slice(1).join(' ') || '',
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
         identification: {
-          type: 'CPF',
-          number: userData.cpf.replace(/\D/g, '')
+          type: "CPF",
+          number: user.cpf
         }
       },
-      notification_url: `${process.env.API_BASE_URL || 'https://apitubeflow.conexaocode.com'}/api/pix/webhook`,
-      description: `Assinatura ${plan.label} - ${plan.period}`,
-      external_reference: externalReference,
-      date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
+      notification_url: process.env.MP_WEBHOOK_URL,
+      description: paymentData.description,
+      external_reference: paymentData.external_reference,
+      date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString() // 30 minutos de expiração
     };
 
-    console.log('Payload enviado ao Mercado Pago:', JSON.stringify(paymentPayload, null, 2));
+    // Debug: Exibir payload
+    console.log('Payload enviado ao Mercado Pago:', JSON.stringify(payloadMP, null, 2));
 
-    const idempotencyKey = externalReference; 
+    // Envio para API do Mercado Pago
+    const paymentResult = await mercadopago.payment.create(payloadMP);
 
-    const requestHeaders = {
-      ...mpHeaders,
-      'X-Idempotency-Key': idempotencyKey
+    // Extrair tipo de plano da descrição (assume formato "Texto - [plan_type]")
+    const planType = payloadMP.description.includes('-') 
+      ? payloadMP.description.split('-').pop().trim()
+      : 'unknown';
+
+    // Registro no banco de dados com plan_type
+    const registeredPayment = await registerPayment(
+      user.id,
+      paymentResult.body.id,
+      payloadMP.transaction_amount,
+      'pending', // Status inicial
+      'pix', // Método de pagamento
+      payloadMP.external_reference,
+      planType // Novo campo adicionado
+    );
+
+    // Montagem da resposta
+    const responseData = {
+      paymentId: paymentResult.body.id,
+      qrCode: paymentResult.body.point_of_interaction.transaction_data.qr_code,
+      qrCodeBase64: paymentResult.body.point_of_interaction.transaction_data.qr_code_base64,
+      paymentStatus: paymentResult.body.status,
+      planType: planType,
+      externalReference: payloadMP.external_reference
     };
 
-    // Chamada corrigida:
-    const mpResponse = await axios.post(`${MP_API_URL}/payments`, paymentPayload, {
-      headers: requestHeaders, 
-      timeout: 10000
-    });
-
-    // Processamento da resposta
-    const pixData = mpResponse.data.point_of_interaction.transaction_data;
-
-    // Registro do pagamento
-    const dbPayment = await registerPayment(pool, {
-      external_reference: externalReference,
-      mercadopago_id: mpResponse.data.id,
-      amount: transactionAmount, // Já convertido
-      status: mpResponse.data.status,
-      payment_method: 'pix',
-      user_email: userData.email,
-      user_cpf: userData.cpf,
-      qr_code: pixData.qr_code,
-      qr_code_base64: pixData.qr_code_base64,
-      expiration: pixData.date_of_expiration,
-      plan_type: plan.type
-    });
-
-    return res.json({
-      paymentId: dbPayment.id,
-      qrCode: pixData.qr_code,
-      qrCodeBase64: pixData.qr_code_base64,
-      expires: pixData.date_of_expiration
-    });
+    console.log('Pagamento registrado com sucesso:', responseData);
+    return res.status(200).json(responseData);
 
   } catch (error) {
     console.error('Erro detalhado no Mercado Pago:', {
       message: error.message,
-      responseData: error.response?.data,
+      responseData: error.body,
       stack: error.stack
     });
 
-    throw new Error('Falha na comunicação com o gateway de pagamento: ' + error.message);
+    // Tratamento específico para erros de banco de dados
+    if (error.message.includes('column "plan_type"')) {
+      throw new Error(`Erro de configuração do banco de dados: ${error.message}`);
+    }
+
+    throw new Error(`Falha na comunicação com o gateway de pagamento: ${error.message}`);
   }
 }
 
@@ -322,40 +308,45 @@ async function getPaymentDetails(paymentId) {
 }
 
 // Função de registro do pagamento no banco de dados
-async function registerPayment(pool, paymentData) {
-  const queryText = `
-    INSERT INTO payments (
-      external_reference, 
-      mercadopago_id, 
-      amount, 
-      status, 
-      payment_method, 
-      user_email, 
-      user_cpf, 
-      qr_code, 
-      qr_code_base64, 
-      expiration,
-      plan_type,
-      created_at,
-      updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())
-    RETURNING *`;
+async function registerPayment(
+  userId,
+  transactionId,
+  amount,
+  status,
+  paymentMethod,
+  externalReference,
+  planType // Novo parâmetro adicionado
+) {
+  try {
+    const query = `
+      INSERT INTO payments (
+        user_id,
+        transaction_id,
+        amount,
+        status,
+        payment_method,
+        external_reference,
+        plan_type, // Coluna adicionada
+        created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+      RETURNING *`;
+    
+    const values = [
+      userId,
+      transactionId,
+      amount,
+      status,
+      paymentMethod,
+      externalReference,
+      planType // Novo valor adicionado
+    ];
 
-  const result = await pool.query(queryText, [
-    paymentData.external_reference,
-    paymentData.mercadopago_id,
-    paymentData.amount,
-    paymentData.status,
-    paymentData.payment_method,
-    paymentData.user_email,
-    paymentData.user_cpf,
-    paymentData.qr_code,
-    paymentData.qr_code_base64,
-    paymentData.expiration,
-    paymentData.plan_type
-  ]);
-
-  return result.rows[0];
+    const result = await pool.query(query, values);
+    return result.rows[0];
+  } catch (error) {
+    console.error('Erro ao registrar pagamento:', error);
+    throw new Error('Erro ao registrar pagamento no banco de dados');
+  }
 }
 
 async function activateSubscription(pool, paymentInfo) {
