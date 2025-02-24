@@ -69,7 +69,7 @@ router.post('/create-payment', async (req, res) => {
 
     // Processa pagamento PIX
     if (paymentMethod === 'pix') {
-      return await handlePixPayment(client, res, validatedPlan, userData);
+      return await handlePixPayment(client, res, dbPlan, userData); // Enviar dbPlan direto
     }
 
     return res.status(400).json({
@@ -145,8 +145,12 @@ function getPlanPeriod(durationMonths) {
   return periods[durationMonths] || 'custom';
 }
 
-async function handlePixPayment(userData, paymentData, res) {
+async function handlePixPayment(client, res, dbPlan, userData) {
   try {
+
+    if (!dbPlan || !dbPlan.price) {
+      throw new Error('Plano inválido ou preço não encontrado');
+    }
     // Validação dos dados temporários do usuário
     if (!userData || !userData.cpf || !userData.email) {
       throw new Error('Dados do usuário incompletos para processamento de pagamento');
@@ -157,7 +161,7 @@ async function handlePixPayment(userData, paymentData, res) {
 
     // Montagem do payload para Mercado Pago
     const payloadMP = {
-      transaction_amount: paymentData.price,
+      transaction_amount: dbPlan.price,
       payment_method_id: "pix",
       payer: {
         email: userData.email,
@@ -252,7 +256,6 @@ function validatePaymentData(data) {
     return false;
   }
 
-  // Validação adicional de valores monetários
   if (typeof data.plan.price !== 'number' || data.plan.price <= 0) {
     console.error('Valor do plano inválido:', data.plan.price);
     return false;
@@ -261,13 +264,6 @@ function validatePaymentData(data) {
   return true;
 }
 
-// Validação dos valores dos planos
-function validatePlanPrice(plan) {
-  const validPrices = new Set([97.00, 997.00]);
-  return validPrices.has(plan.price);
-}
-
-// Verificação de assinatura HMAC
 function verifyWebhookSignature(req) {
   try {
     const signatureHeader = req.headers['x-signature'];
