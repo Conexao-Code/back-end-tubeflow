@@ -89,7 +89,6 @@ router.post('/create-payment', async (req, res) => {
   }
 });
 
-// Rota para webhook de notificações PIX
 router.post('/pix/webhook', express.json(), async (req, res) => {
   try {
     const pool = req.db;
@@ -103,10 +102,6 @@ router.post('/pix/webhook', express.json(), async (req, res) => {
 
     const paymentInfo = await getPaymentDetails(paymentId);
     await updatePaymentStatus(pool, paymentInfo);
-
-    if (paymentInfo.status === 'approved') {
-      await activateSubscription(pool, paymentInfo);
-    }
 
     return res.json({ status: 'success' });
 
@@ -124,7 +119,7 @@ async function getPlanFromDatabase(client, planType) {
     };
 
     const result = await client.query(query);
-    
+
     if (result.rows.length === 0) {
       throw new Error(`Plano '${planType}' não encontrado`);
     }
@@ -169,7 +164,7 @@ async function handlePixPayment(client, res, dbPlan, userData) {
 
     // Geração de ID único para idempotência
     const externalReference = uuidv4();
-    
+
     // Log de depuração detalhado
     console.log('Dados para Mercado Pago:', {
       amountType: typeof transactionAmount,
@@ -207,12 +202,11 @@ async function handlePixPayment(client, res, dbPlan, userData) {
       timeout: 10000 // Aumento do timeout
     });
 
-    // Registro no banco com tipos corretos
     const registeredPayment = await registerPayment(
       userData.email,
       userData.cpf,
-      response.data.id,
-      transactionAmount, // Garantindo tipo numérico
+      response.data.id,  // Agora vai para mercadopago_id
+      transactionAmount,
       'pending',
       'pix',
       externalReference,
@@ -253,8 +247,8 @@ async function handlePixPayment(client, res, dbPlan, userData) {
 
     // Resposta adaptada para diferentes tipos de erro
     const statusCode = error.response?.status || 500;
-    const errorMessage = error.response?.data?.error === 'bad_request' 
-      ? 'Erro na validação dos dados' 
+    const errorMessage = error.response?.data?.error === 'bad_request'
+      ? 'Erro na validação dos dados'
       : 'Falha no processamento do pagamento';
 
     return res.status(statusCode).json({
@@ -335,7 +329,14 @@ async function getPaymentDetails(paymentId) {
       headers: mpHeaders,
       timeout: 5000
     });
-    return response.data;
+    
+    // Adicionar mapeamento do ID correto
+    return {
+      ...response.data,
+      id: response.data.id,        // Mantém compatibilidade
+      mercadopago_id: response.data.id  // Novo mapeamento
+    };
+    
   } catch (error) {
     console.error('Falha ao obter detalhes do pagamento:', {
       paymentId,
@@ -350,23 +351,22 @@ async function getPaymentDetails(paymentId) {
 async function registerPayment(
   tempEmail,
   tempCpf,
-  transactionId,
+  mercadopagoId,  // Nome do parâmetro alterado
   amount,
   status,
   paymentMethod,
   externalReference,
   planType
 ) {
-  // Declara as variáveis fora do try para serem acessíveis no catch
   let queryText;
   let values;
-  
+
   try {
     queryText = `
       INSERT INTO payments (
         temp_email,
         temp_cpf,
-        transaction_id,
+        mercadopago_id,  // Coluna corrigida
         amount,
         status,
         payment_method,
@@ -379,7 +379,7 @@ async function registerPayment(
     values = [
       tempEmail,
       tempCpf,
-      transactionId,
+      mercadopagoId,  // Valor corrigido
       amount,
       status,
       paymentMethod,
@@ -388,19 +388,15 @@ async function registerPayment(
     ];
 
     const result = await pool.query(queryText, values);
-    
-    console.log('Pagamento registrado no banco:', JSON.stringify(result.rows[0], null, 2));
-    
     return result.rows[0];
 
   } catch (error) {
     console.error('Erro detalhado ao registrar pagamento:', {
       errorMessage: error.message,
       stack: error.stack,
-      query: queryText, // Agora acessível
-      values: values    // Agora acessível
+      query: queryText,
+      values: values
     });
-    
     throw new Error(`Falha ao registrar pagamento: ${error.message}`);
   }
 }
@@ -436,7 +432,7 @@ async function createUserIfNotExists(client, userData) {
     ]);
 
     console.log('Novo usuário criado:', JSON.stringify(newUserResult.rows[0], null, 2));
-    
+
     return newUserResult.rows[0];
 
   } catch (error) {
@@ -445,105 +441,11 @@ async function createUserIfNotExists(client, userData) {
       errorMessage: error.message,
       stack: error.stack
     });
-    
+
     throw new Error(`Falha ao criar usuário: ${error.message}`);
   }
 }
 
-async function activateSubscription(pool, paymentInfo) {
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    // Buscar dados do pagamento
-    const paymentQuery = await client.query(
-      `SELECT * FROM payments 
-       WHERE transaction_id = $1 
-       AND status = 'approved' 
-       FOR UPDATE`,
-      [paymentInfo.id]
-    );
-
-    if (paymentQuery.rowCount === 0) {
-      throw new Error(`Pagamento aprovado não encontrado: ${paymentInfo.id}`);
-    }
-
-    const payment = paymentQuery.rows[0];
-
-    // Criar ou encontrar usuário
-    const user = await createUserIfNotExists(client, {
-      email: payment.temp_email,
-      cpf: payment.temp_cpf
-    });
-
-    // Calcular datas da assinatura
-    const startDate = new Date();
-    const endDate = new Date(startDate);
-    
-    switch (payment.plan_type) {
-      case 'monthly':
-        endDate.setMonth(startDate.getMonth() + 1);
-        break;
-      case 'quarterly':
-        endDate.setMonth(startDate.getMonth() + 3);
-        break;
-      case 'annual':
-        endDate.setFullYear(startDate.getFullYear() + 1);
-        break;
-      default:
-        throw new Error(`Tipo de plano inválido: ${payment.plan_type}`);
-    }
-
-    // Registrar assinatura
-    const subscriptionQuery = `
-      INSERT INTO subscriptions (
-        user_id,
-        payment_id,
-        plan_type,
-        start_date,
-        end_date,
-        active,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-      ON CONFLICT (user_id) 
-      DO UPDATE SET
-        plan_type = EXCLUDED.plan_type,
-        end_date = EXCLUDED.end_date,
-        active = EXCLUDED.active,
-        updated_at = NOW()
-      RETURNING *`;
-
-    const subscriptionResult = await client.query(subscriptionQuery, [
-      user.id,
-      payment.id,
-      payment.plan_type,
-      startDate,
-      endDate,
-      true
-    ]);
-
-    await client.query('COMMIT');
-    
-    console.log('Assinatura ativada com sucesso:', JSON.stringify(subscriptionResult.rows[0], null, 2));
-    
-    return subscriptionResult.rows[0];
-
-  } catch (error) {
-    await client.query('ROLLBACK');
-    console.error('Erro detalhado na ativação da assinatura:', {
-      paymentId: paymentInfo.id,
-      errorMessage: error.message,
-      stack: error.stack
-    });
-    
-    throw new Error(`Falha na ativação da assinatura: ${error.message}`);
-  } finally {
-    client.release();
-  }
-}
-
-// Atualização do status do pagamento
 async function updatePaymentStatus(pool, paymentInfo) {
   try {
     const queryText = `
@@ -552,7 +454,7 @@ async function updatePaymentStatus(pool, paymentInfo) {
         status = $1,
         updated_at = NOW(),
         attempts = attempts + 1
-      WHERE mercadopago_id = $2
+      WHERE mercadopago_id = $2 
       RETURNING *`;
 
     const result = await pool.query(queryText, [
@@ -572,74 +474,6 @@ async function updatePaymentStatus(pool, paymentInfo) {
       error: error.message
     });
     throw new Error(`Falha na atualização do status: ${error.message}`);
-  }
-}
-
-// Ativação da assinatura do usuário
-async function activateSubscription(pool, paymentInfo) {
-  try {
-    // Buscar dados completos do pagamento
-    const paymentQuery = await pool.query(
-      `SELECT * FROM payments 
-       WHERE mercadopago_id = $1 
-       AND status = 'approved'`,
-      [paymentInfo.id]
-    );
-
-    if (paymentQuery.rowCount === 0) {
-      throw new Error(`Pagamento aprovado não encontrado: ${paymentInfo.id}`);
-    }
-
-    const payment = paymentQuery.rows[0];
-    const startDate = new Date();
-    const endDate = new Date(startDate);
-
-    // Determinar período da assinatura
-    if (payment.amount === 97.00) {
-      endDate.setMonth(startDate.getMonth() + 1);
-    } else if (payment.amount === 997.00) {
-      endDate.setFullYear(startDate.getFullYear() + 1);
-    } else {
-      throw new Error(`Valor de pagamento inválido para assinatura: ${payment.amount}`);
-    }
-
-    // Registrar assinatura
-    const subscriptionQuery = `
-      INSERT INTO subscriptions (
-        payment_id,
-        user_email,
-        plan_type,
-        start_date,
-        end_date,
-        active,
-        created_at,
-        updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-      ON CONFLICT (user_email) 
-      DO UPDATE SET
-        plan_type = EXCLUDED.plan_type,
-        end_date = EXCLUDED.end_date,
-        active = EXCLUDED.active,
-        updated_at = NOW()
-      RETURNING *`;
-
-    const subscriptionValues = [
-      payment.id,
-      payment.user_email,
-      payment.amount === 97.00 ? 'monthly' : 'annual',
-      startDate,
-      endDate,
-      true
-    ];
-
-    await pool.query(subscriptionQuery, subscriptionValues);
-
-  } catch (error) {
-    console.error('Falha na ativação da assinatura:', {
-      paymentId: paymentInfo.id,
-      error: error.message
-    });
-    throw new Error(`Erro na ativação da assinatura: ${error.message}`);
   }
 }
 
