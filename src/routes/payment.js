@@ -329,14 +329,14 @@ async function getPaymentDetails(paymentId) {
       headers: mpHeaders,
       timeout: 5000
     });
-    
+
     // Adicionar mapeamento do ID correto
     return {
       ...response.data,
       id: response.data.id,        // Mantém compatibilidade
       mercadopago_id: response.data.id  // Novo mapeamento
     };
-    
+
   } catch (error) {
     console.error('Falha ao obter detalhes do pagamento:', {
       paymentId,
@@ -363,23 +363,24 @@ async function registerPayment(
 
   try {
     queryText = `
-      INSERT INTO payments (
-        temp_email,
-        temp_cpf,
-        mercadopago_id,
-        amount,
-        status,
-        payment_method,
-        external_reference,
-        plan_type,
-        created_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-      RETURNING *`;
+    INSERT INTO payments (
+      user_email,      // Coluna obrigatória
+      user_cpf,        // Coluna obrigatória
+      mercadopago_id,
+      amount,
+      status,
+      payment_method,
+      external_reference,
+      plan_type,
+      created_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+    RETURNING *`;
 
+    // Valores devem vir na ordem correta:
     values = [
-      tempEmail,
-      tempCpf,
-      mercadopagoId,  // Valor corrigido
+      tempEmail,      // Mapeia para user_email (não temp_email)
+      tempCpf,        // Mapeia para user_cpf (não temp_cpf)
+      mercadopagoId,
       amount,
       status,
       paymentMethod,
