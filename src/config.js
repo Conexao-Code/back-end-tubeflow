@@ -30,6 +30,8 @@ module.exports = {
     fetchInterval: 30 * 60 * 1000,
     queueProcessInterval: 5000,
     port: process.env.PORT || 1100,
+
+    baseUrl: 'https://apitubeflow.conexaocode.com',
     
     allowedOrigins: [
         'http://localhost:5173',

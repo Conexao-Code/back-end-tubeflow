@@ -147,6 +147,10 @@ function getPlanPeriod(durationMonths) {
 
 async function handlePixPayment(client, res, dbPlan, userData) {
   try {
+
+    if (!config.baseUrl) {
+      throw new Error('Configuração baseUrl não encontrada');
+    }
     // Validação robusta do plano e preço
     if (!dbPlan || typeof dbPlan.price === 'undefined') {
       throw new Error('Plano inválido ou preço não encontrado');
@@ -187,7 +191,7 @@ async function handlePixPayment(client, res, dbPlan, userData) {
           number: userData.cpf
         }
       },
-      notification_url: `${process.env.BASE_URL}/pix/webhook`,
+      notification_url: `${config.baseUrl}/pix/webhook`,
       description: `Assinatura ${dbPlan.type} - ${dbPlan.description || 'Plano Premium'}`,
       external_reference: externalReference,
       date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
