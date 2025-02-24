@@ -357,8 +357,12 @@ async function registerPayment(
   externalReference,
   planType
 ) {
+  // Declara as variáveis fora do try para serem acessíveis no catch
+  let queryText;
+  let values;
+  
   try {
-    const queryText = `
+    queryText = `
       INSERT INTO payments (
         temp_email,
         temp_cpf,
@@ -372,7 +376,7 @@ async function registerPayment(
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
       RETURNING *`;
 
-    const values = [
+    values = [
       tempEmail,
       tempCpf,
       transactionId,
@@ -393,8 +397,8 @@ async function registerPayment(
     console.error('Erro detalhado ao registrar pagamento:', {
       errorMessage: error.message,
       stack: error.stack,
-      query: queryText,
-      values: values
+      query: queryText, // Agora acessível
+      values: values    // Agora acessível
     });
     
     throw new Error(`Falha ao registrar pagamento: ${error.message}`);
