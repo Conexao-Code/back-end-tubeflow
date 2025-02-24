@@ -119,12 +119,12 @@ router.post('/pix/webhook', express.json(), async (req, res) => {
 async function getPlanFromDatabase(client, planType) {
   try {
     const query = {
-      text: 'SELECT * FROM plans WHERE LOWER(type) = $1',
+      text: 'SELECT type, price::float, duration_months, description FROM plans WHERE LOWER(type) = $1',
       values: [planType]
     };
 
     const result = await client.query(query);
-
+    
     if (result.rows.length === 0) {
       throw new Error(`Plano '${planType}' não encontrado`);
     }
@@ -145,85 +145,121 @@ function getPlanPeriod(durationMonths) {
   return periods[durationMonths] || 'custom';
 }
 
-// Função handlePixPayment corrigida
 async function handlePixPayment(client, res, dbPlan, userData) {
   try {
-    if (!dbPlan || !dbPlan.price) {
+    // Validação robusta do plano e preço
+    if (!dbPlan || typeof dbPlan.price === 'undefined') {
       throw new Error('Plano inválido ou preço não encontrado');
     }
 
-    // Validação dos dados temporários do usuário
-    if (!userData || !userData.cpf || !userData.email) {
-      throw new Error('Dados do usuário incompletos para processamento de pagamento');
+    // Conversão explícita e validação do tipo numérico
+    const transactionAmount = Number(dbPlan.price);
+    if (isNaN(transactionAmount)) {
+      throw new Error(`Valor do plano inválido: ${dbPlan.price} (Tipo: ${typeof dbPlan.price})`);
     }
 
-    // Gerar referência única para o pagamento
-    const externalReference = uuidv4();
+    // Validação dos dados do usuário
+    if (!userData?.cpf || !userData?.email) {
+      throw new Error('Dados do usuário incompletos para processamento');
+    }
 
-    // Montagem do payload para Mercado Pago
+    // Geração de ID único para idempotência
+    const externalReference = uuidv4();
+    
+    // Log de depuração detalhado
+    console.log('Dados para Mercado Pago:', {
+      amountType: typeof transactionAmount,
+      amountValue: transactionAmount,
+      planType: dbPlan.type,
+      userCPF: userData.cpf
+    });
+
+    // Montagem do payload com tipos corretos
     const payloadMP = {
-      transaction_amount: dbPlan.price,
+      transaction_amount: transactionAmount,
       payment_method_id: "pix",
       payer: {
         email: userData.email,
-        first_name: userData.first_name || '',
-        last_name: userData.last_name || '',
+        first_name: userData.name?.split(' ')[0] || '',
+        last_name: userData.name?.split(' ').slice(1).join(' ') || '',
         identification: {
           type: "CPF",
           number: userData.cpf
         }
       },
       notification_url: `${process.env.BASE_URL}/pix/webhook`,
-      description: `Assinatura ${dbPlan.type} - ${dbPlan.description}`, // Corrigido para dbPlan
+      description: `Assinatura ${dbPlan.type} - ${dbPlan.description || 'Plano Premium'}`,
       external_reference: externalReference,
       date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
     };
 
-    // Envio para API do Mercado Pago
+    // Envio com headers atualizados
     const response = await axios.post(`${MP_API_URL}/payments`, payloadMP, {
       headers: {
         ...mpHeaders,
-        'X-Idempotency-Key': externalReference
-      }
+        'X-Idempotency-Key': externalReference,
+        'X-Debug-Mode': 'true' // Header adicional para diagnóstico
+      },
+      timeout: 10000 // Aumento do timeout
     });
 
-    // Registrar pagamento com dados temporários
+    // Registro no banco com tipos corretos
     const registeredPayment = await registerPayment(
       userData.email,
       userData.cpf,
       response.data.id,
-      dbPlan.price, // Usar price do dbPlan
+      transactionAmount, // Garantindo tipo numérico
       'pending',
       'pix',
       externalReference,
-      dbPlan.type // Usar type do dbPlan
+      dbPlan.type
     );
 
-    // Montagem da resposta
+    // Formatação da resposta com dados completos
     const responseData = {
       payment_id: response.data.id,
-      qr_code: response.data.point_of_interaction.transaction_data.qr_code,
-      qr_code_base64: response.data.point_of_interaction.transaction_data.qr_code_base64,
-      ticket_url: response.data.point_of_interaction.transaction_data.ticket_url,
+      qr_code: response.data.point_of_interaction?.transaction_data?.qr_code || '',
+      qr_code_base64: response.data.point_of_interaction?.transaction_data?.qr_code_base64 || '',
+      ticket_url: response.data.point_of_interaction?.transaction_data?.ticket_url || '',
       expiration_date: response.data.date_of_expiration,
-      external_reference: externalReference
+      external_reference: externalReference,
+      debug: {
+        mp_status: response.status,
+        amount_sent: transactionAmount
+      }
     };
 
-    console.log('Pagamento PIX criado com sucesso:', JSON.stringify(responseData, null, 2));
-    
+    console.log('Pagamento registrado com sucesso:', JSON.stringify({
+      paymentId: responseData.payment_id,
+      amount: transactionAmount,
+      user: userData.email.slice(0, 3) + '...' // Log seguro
+    }, null, 2));
+
     return res.status(200).json(responseData);
 
   } catch (error) {
-    console.error('Erro detalhado no processamento PIX:', {
+    // Log detalhado do erro
+    console.error('Erro completo no PIX:', {
       errorMessage: error.message,
       stack: error.stack,
+      requestData: error.config?.data ? JSON.parse(error.config.data) : null,
+      responseStatus: error.response?.status,
       responseData: error.response?.data
     });
 
+    // Resposta adaptada para diferentes tipos de erro
     const statusCode = error.response?.status || 500;
+    const errorMessage = error.response?.data?.error === 'bad_request' 
+      ? 'Erro na validação dos dados' 
+      : 'Falha no processamento do pagamento';
+
     return res.status(statusCode).json({
-      error: 'Falha ao processar pagamento PIX',
-      details: error.response?.data || error.message
+      error: errorMessage,
+      details: {
+        code: error.response?.data?.cause?.[0]?.code || 'unknown',
+        description: error.response?.data?.cause?.[0]?.description || error.message,
+        field: error.response?.data?.cause?.[0]?.field || 'general'
+      }
     });
   }
 }
