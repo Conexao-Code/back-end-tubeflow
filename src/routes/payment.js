@@ -366,7 +366,7 @@ async function registerPayment(
       INSERT INTO payments (
         temp_email,
         temp_cpf,
-        mercadopago_id,  // Coluna corrigida
+        mercadopago_id,
         amount,
         status,
         payment_method,
