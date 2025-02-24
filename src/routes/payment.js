@@ -23,7 +23,7 @@ const MP_WEBHOOK_SECRET = "9dcee93ad0b999bc005ed723554e8f7cdd7021d036f1f043a39ee
 const mpHeaders = {
   'Authorization': `Bearer ${MP_ACCESS_TOKEN}`,
   'Content-Type': 'application/json',
-  'X-Idempotency-Key': '' // Será preenchido dinamicamente
+  'X-Idempotency-Key': ''
 };
 
 router.use((req, res, next) => {
@@ -34,14 +34,12 @@ router.use((req, res, next) => {
 router.post('/create-payment', async (req, res) => {
   let client;
   try {
-    // Verificação da conexão
     client = await pool.connect();
     const testResult = await client.query('SELECT 1 + 1 AS result');
     console.log('Teste de conexão bem-sucedido:', testResult.rows[0].result === 2);
 
     const { paymentMethod, plan, userData } = req.body;
 
-    // Validações
     if (!plan || !plan.type) {
       return res.status(400).json({
         error: 'Plano inválido',
@@ -56,20 +54,10 @@ router.post('/create-payment', async (req, res) => {
       });
     }
 
-    // Busca o plano no banco
     const dbPlan = await getPlanFromDatabase(client, plan.type.toLowerCase());
 
-    const validatedPlan = {
-      type: dbPlan.type,
-      price: parseFloat(dbPlan.price), // Conversão explícita
-      duration: dbPlan.duration_months,
-      label: dbPlan.description,
-      period: getPlanPeriod(dbPlan.duration_months)
-    };
-
-    // Processa pagamento PIX
     if (paymentMethod === 'pix') {
-      return await handlePixPayment(client, res, dbPlan, userData); // Enviar dbPlan direto
+      return await handlePixPayment(client, res, dbPlan, userData);
     }
 
     return res.status(400).json({
@@ -142,39 +130,21 @@ function getPlanPeriod(durationMonths) {
 
 async function handlePixPayment(client, res, dbPlan, userData) {
   try {
-
     if (!config.baseUrl) {
       throw new Error('Configuração baseUrl não encontrada');
     }
-    // Validação robusta do plano e preço
-    if (!dbPlan || typeof dbPlan.price === 'undefined') {
-      throw new Error('Plano inválido ou preço não encontrado');
-    }
 
-    // Conversão explícita e validação do tipo numérico
     const transactionAmount = Number(dbPlan.price);
     if (isNaN(transactionAmount)) {
-      throw new Error(`Valor do plano inválido: ${dbPlan.price} (Tipo: ${typeof dbPlan.price})`);
+      throw new Error(`Valor do plano inválido: ${dbPlan.price}`);
     }
 
-    // Validação dos dados do usuário
     if (!userData?.cpf || !userData?.email) {
-      throw new Error('Dados do usuário incompletos para processamento');
+      throw new Error('Dados do usuário incompletos');
     }
 
-    // Geração de ID único para idempotência
     const externalReference = uuidv4();
-
-    // Log de depuração detalhado
-    console.log('Dados para Mercado Pago:', {
-      amountType: typeof transactionAmount,
-      amountValue: transactionAmount,
-      planType: dbPlan.type,
-      userCPF: userData.cpf
-    });
-
-    // Montagem do payload com tipos corretos
-    const payloadMP = {
+    const pixPayload = {
       transaction_amount: transactionAmount,
       payment_method_id: "pix",
       payer: {
@@ -192,20 +162,19 @@ async function handlePixPayment(client, res, dbPlan, userData) {
       date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
     };
 
-    // Envio com headers atualizados
-    const response = await axios.post(`${MP_API_URL}/payments`, payloadMP, {
+    const mpResponse = await axios.post(`${MP_API_URL}/payments`, pixPayload, {
       headers: {
         ...mpHeaders,
         'X-Idempotency-Key': externalReference,
-        'X-Debug-Mode': 'true' // Header adicional para diagnóstico
+        'X-Debug-Mode': 'true'
       },
-      timeout: 10000 // Aumento do timeout
+      timeout: 10000
     });
 
-    const registeredPayment = await registerPayment(
+    await registerPayment(
       userData.email,
       userData.cpf,
-      response.data.id,  // Agora vai para mercadopago_id
+      mpResponse.data.id,
       transactionAmount,
       'pending',
       'pix',
@@ -213,85 +182,62 @@ async function handlePixPayment(client, res, dbPlan, userData) {
       dbPlan.type
     );
 
-    // Formatação da resposta com dados completos
+    const transactionData = mpResponse.data.point_of_interaction?.transaction_data || {};
     const responseData = {
-      payment_id: response.data.id,
-      qr_code: response.data.point_of_interaction?.transaction_data?.qr_code || '',
-      qr_code_base64: response.data.point_of_interaction?.transaction_data?.qr_code_base64 || '',
-      ticket_url: response.data.point_of_interaction?.transaction_data?.ticket_url || '',
-      expiration_date: response.data.date_of_expiration,
+      payment_id: mpResponse.data.id,
+      qr_code: transactionData.qr_code || '',
+      qr_code_base64: transactionData.qr_code_base64 || '',
+      ticket_url: transactionData.ticket_url || '',
+      expiration_date: mpResponse.data.date_of_expiration,
       external_reference: externalReference,
-      debug: {
-        mp_status: response.status,
-        amount_sent: transactionAmount
+      payment_details: {
+        amount: transactionAmount,
+        payer_name: userData.name,
+        payer_email: userData.email,
+        payer_cpf: userData.cpf,
+        plan_type: dbPlan.type,
+        created_at: new Date().toISOString()
       }
     };
 
-    console.log('Pagamento registrado com sucesso:', JSON.stringify({
+    console.log('Pagamento PIX registrado:', JSON.stringify({
       paymentId: responseData.payment_id,
       amount: transactionAmount,
-      user: userData.email.slice(0, 3) + '...' // Log seguro
+      user: userData.email
     }, null, 2));
 
     return res.status(200).json(responseData);
 
   } catch (error) {
-    // Log detalhado do erro
     console.error('Erro completo no PIX:', {
       errorMessage: error.message,
       stack: error.stack,
-      requestData: error.config?.data ? JSON.parse(error.config.data) : null,
+      requestData: error.config?.data,
       responseStatus: error.response?.status,
       responseData: error.response?.data
     });
 
-    // Resposta adaptada para diferentes tipos de erro
     const statusCode = error.response?.status || 500;
-    const errorMessage = error.response?.data?.error === 'bad_request'
-      ? 'Erro na validação dos dados'
+    const errorMessage = error.response?.data?.error === 'bad_request' 
+      ? 'Erro na validação dos dados' 
       : 'Falha no processamento do pagamento';
 
     return res.status(statusCode).json({
       error: errorMessage,
-      details: {
-        code: error.response?.data?.cause?.[0]?.code || 'unknown',
-        description: error.response?.data?.cause?.[0]?.description || error.message,
-        field: error.response?.data?.cause?.[0]?.field || 'general'
-      }
+      details: error.response?.data || error.message
     });
   }
 }
 
-// Função validatePaymentData corrigida
 function validatePaymentData(data) {
   const cpfRegex = /^\d{11}$/;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-  // Validação hierárquica detalhada
-  if (!data.userData) {
-    console.error('Dados do usuário ausentes:', data);
-    return false;
-  }
+  if (!data.userData || !data.plan) return false;
 
-  if (!data.userData.cpf || !cpfRegex.test(data.userData.cpf)) {
-    console.error('CPF inválido:', data.userData.cpf);
-    return false;
-  }
-
-  if (!data.userData.email || !emailRegex.test(data.userData.email)) {
-    console.error('Email inválido:', data.userData.email);
-    return false;
-  }
-
-  if (!data.plan || !Object.values(PLAN_TYPES).includes(data.plan.type.toLowerCase())) {
-    console.error('Tipo de plano inválido:', {
-      received: data.plan?.type,
-      valid: Object.values(PLAN_TYPES)
-    });
-    return false;
-  }
-
-  return true; // Removida verificação do price
+  return cpfRegex.test(data.userData.cpf) &&
+         emailRegex.test(data.userData.email) &&
+         Object.values(PLAN_TYPES).includes(data.plan.type?.toLowerCase());
 }
 
 function verifyWebhookSignature(req) {
@@ -322,7 +268,6 @@ function verifyWebhookSignature(req) {
   }
 }
 
-// Função para obter detalhes do pagamento
 async function getPaymentDetails(paymentId) {
   try {
     const response = await axios.get(`${MP_API_URL}/payments/${paymentId}`, {
@@ -330,11 +275,9 @@ async function getPaymentDetails(paymentId) {
       timeout: 5000
     });
 
-    // Adicionar mapeamento do ID correto
     return {
       ...response.data,
-      id: response.data.id,        // Mantém compatibilidade
-      mercadopago_id: response.data.id  // Novo mapeamento
+      mercadopago_id: response.data.id
     };
 
   } catch (error) {
@@ -343,29 +286,24 @@ async function getPaymentDetails(paymentId) {
       status: error.response?.status,
       data: error.response?.data
     });
-    throw new Error(`Erro na recuperação de dados do pagamento: ${error.message}`);
+    throw new Error(`Erro na recuperação de dados: ${error.message}`);
   }
 }
 
-// Função de registro do pagamento no banco de dados
 async function registerPayment(
-  tempEmail,
-  tempCpf,
-  mercadopagoId,  // Nome do parâmetro alterado
+  userEmail,
+  userCpf,
+  mercadopagoId,
   amount,
   status,
   paymentMethod,
   externalReference,
   planType
 ) {
-  let queryText;
-  let values;
-
-  try {
-    queryText = `
+  const queryText = `
     INSERT INTO payments (
-      user_email,    
-      user_cpf,      
+      user_email,
+      user_cpf,
       mercadopago_id,
       amount,
       status,
@@ -376,35 +314,33 @@ async function registerPayment(
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
     RETURNING *`;
 
-    // Valores devem vir na ordem correta:
-    values = [
-      tempEmail,      // Mapeia para user_email (não temp_email)
-      tempCpf,        // Mapeia para user_cpf (não temp_cpf)
-      mercadopagoId,
-      amount,
-      status,
-      paymentMethod,
-      externalReference,
-      planType
-    ];
+  const values = [
+    userEmail,
+    userCpf,
+    mercadopagoId,
+    amount,
+    status,
+    paymentMethod,
+    externalReference,
+    planType
+  ];
 
+  try {
     const result = await pool.query(queryText, values);
     return result.rows[0];
-
   } catch (error) {
-    console.error('Erro detalhado ao registrar pagamento:', {
+    console.error('Erro ao registrar pagamento:', {
       errorMessage: error.message,
       stack: error.stack,
       query: queryText,
       values: values
     });
-    throw new Error(`Falha ao registrar pagamento: ${error.message}`);
+    throw new Error(`Falha no registro: ${error.message}`);
   }
 }
 
 async function createUserIfNotExists(client, userData) {
   try {
-    // Verificar se usuário já existe
     const existingUser = await client.query(
       `SELECT * FROM users 
        WHERE email = $1 OR cpf = $2 
@@ -413,51 +349,39 @@ async function createUserIfNotExists(client, userData) {
     );
 
     if (existingUser.rowCount > 0) {
-      console.log('Usuário já existente:', existingUser.rows[0].id);
       return existingUser.rows[0];
     }
 
-    // Criar novo usuário
-    const newUserQuery = `
-      INSERT INTO users (
+    const newUserResult = await client.query(
+      `INSERT INTO users (
         email,
         cpf,
         created_at,
         updated_at
       ) VALUES ($1, $2, NOW(), NOW())
-      RETURNING *`;
-
-    const newUserResult = await client.query(newUserQuery, [
-      userData.email,
-      userData.cpf
-    ]);
-
-    console.log('Novo usuário criado:', JSON.stringify(newUserResult.rows[0], null, 2));
+      RETURNING *`,
+      [userData.email, userData.cpf]
+    );
 
     return newUserResult.rows[0];
 
   } catch (error) {
-    console.error('Erro detalhado ao criar usuário:', {
-      email: userData.email,
-      errorMessage: error.message,
-      stack: error.stack
-    });
-
-    throw new Error(`Falha ao criar usuário: ${error.message}`);
+    console.error('Erro ao criar usuário:', error.message);
+    throw new Error(`Falha na criação: ${error.message}`);
   }
 }
 
 async function updatePaymentStatus(pool, paymentInfo) {
-  try {
-    const queryText = `
-      UPDATE payments 
-      SET 
-        status = $1,
-        updated_at = NOW(),
-        attempts = attempts + 1
-      WHERE mercadopago_id = $2 
-      RETURNING *`;
+  const queryText = `
+    UPDATE payments 
+    SET 
+      status = $1,
+      updated_at = NOW(),
+      attempts = attempts + 1
+    WHERE mercadopago_id = $2 
+    RETURNING *`;
 
+  try {
     const result = await pool.query(queryText, [
       paymentInfo.status,
       paymentInfo.id
@@ -470,11 +394,8 @@ async function updatePaymentStatus(pool, paymentInfo) {
     return result.rows[0];
 
   } catch (error) {
-    console.error('Erro na atualização do status:', {
-      paymentId: paymentInfo.id,
-      error: error.message
-    });
-    throw new Error(`Falha na atualização do status: ${error.message}`);
+    console.error('Erro na atualização:', error.message);
+    throw new Error(`Falha na atualização: ${error.message}`);
   }
 }
 
