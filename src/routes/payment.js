@@ -81,19 +81,22 @@ router.get('/payments/:id/status', async (req, res) => {
   try {
     const payment = await getPaymentDetails(req.params.id);
     
-    // Atualiza o status no banco de dados
+    // Adicione o amount na resposta
+    const responseData = {
+      payment_id: payment.id,
+      status: payment.status,
+      last_updated: payment.updated_at,
+      amount: payment.amount, // Certifique-se que esse campo existe na sua model
+      plan_type: payment.plan_type
+    };
+
+    // Atualiza o status no banco de dados (se necessário)
     const updatedPayment = await updatePaymentStatus(req.db, {
       id: payment.id,
       status: payment.status
     });
 
-    res.json({
-      payment_id: payment.id,
-      status: payment.status,
-      last_updated: updatedPayment.updated_at,
-      amount: payment.amount,
-      plan_type: updatedPayment.plan_type
-    });
+    res.json({ ...responseData, last_updated: updatedPayment.updated_at });
 
   } catch (error) {
     console.error('Erro na verificação de status:', error);
