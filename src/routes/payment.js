@@ -145,12 +145,13 @@ function getPlanPeriod(durationMonths) {
   return periods[durationMonths] || 'custom';
 }
 
+// Função handlePixPayment corrigida
 async function handlePixPayment(client, res, dbPlan, userData) {
   try {
-
     if (!dbPlan || !dbPlan.price) {
       throw new Error('Plano inválido ou preço não encontrado');
     }
+
     // Validação dos dados temporários do usuário
     if (!userData || !userData.cpf || !userData.email) {
       throw new Error('Dados do usuário incompletos para processamento de pagamento');
@@ -173,7 +174,7 @@ async function handlePixPayment(client, res, dbPlan, userData) {
         }
       },
       notification_url: `${process.env.BASE_URL}/pix/webhook`,
-      description: `Assinatura ${paymentData.type} - ${paymentData.label}`,
+      description: `Assinatura ${dbPlan.type} - ${dbPlan.description}`, // Corrigido para dbPlan
       external_reference: externalReference,
       date_of_expiration: new Date(Date.now() + 30 * 60 * 1000).toISOString()
     };
@@ -191,11 +192,11 @@ async function handlePixPayment(client, res, dbPlan, userData) {
       userData.email,
       userData.cpf,
       response.data.id,
-      paymentData.price,
+      dbPlan.price, // Usar price do dbPlan
       'pending',
       'pix',
       externalReference,
-      paymentData.type
+      dbPlan.type // Usar type do dbPlan
     );
 
     // Montagem da resposta
@@ -227,7 +228,7 @@ async function handlePixPayment(client, res, dbPlan, userData) {
   }
 }
 
-// Validação de dados do pagamento
+// Função validatePaymentData corrigida
 function validatePaymentData(data) {
   const cpfRegex = /^\d{11}$/;
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -248,7 +249,7 @@ function validatePaymentData(data) {
     return false;
   }
 
-  if (!data.plan || !Object.values(PLAN_TYPES).includes(data.plan.type)) {
+  if (!data.plan || !Object.values(PLAN_TYPES).includes(data.plan.type.toLowerCase())) {
     console.error('Tipo de plano inválido:', {
       received: data.plan?.type,
       valid: Object.values(PLAN_TYPES)
@@ -256,12 +257,7 @@ function validatePaymentData(data) {
     return false;
   }
 
-  if (typeof data.plan.price !== 'number' || data.plan.price <= 0) {
-    console.error('Valor do plano inválido:', data.plan.price);
-    return false;
-  }
-
-  return true;
+  return true; // Removida verificação do price
 }
 
 function verifyWebhookSignature(req) {
