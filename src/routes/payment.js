@@ -364,8 +364,8 @@ async function registerPayment(
   try {
     queryText = `
     INSERT INTO payments (
-      user_email,      // Coluna obrigatória
-      user_cpf,        // Coluna obrigatória
+      user_email,    
+      user_cpf,      
       mercadopago_id,
       amount,
       status,
