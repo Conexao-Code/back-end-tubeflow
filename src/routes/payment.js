@@ -77,6 +77,104 @@ router.post('/create-payment', async (req, res) => {
   }
 });
 
+router.get('/payments/:id/status', async (req, res) => {
+  try {
+    const payment = await getPaymentDetails(req.params.id);
+    
+    // Atualiza o status no banco de dados
+    const updatedPayment = await updatePaymentStatus(req.db, {
+      id: payment.id,
+      status: payment.status
+    });
+
+    res.json({
+      payment_id: payment.id,
+      status: payment.status,
+      last_updated: updatedPayment.updated_at,
+      amount: payment.amount,
+      plan_type: updatedPayment.plan_type
+    });
+
+  } catch (error) {
+    console.error('Erro na verificação de status:', error);
+    res.status(500).json({
+      error: 'Erro ao verificar status do pagamento',
+      details: error.message
+    });
+  }
+});
+
+// Atualize a função updatePaymentStatus
+async function updatePaymentStatus(pool, paymentInfo) {
+  const queryText = `
+    UPDATE payments 
+    SET 
+      status = $1,
+      updated_at = NOW(),
+      attempts = attempts + 1
+    WHERE mercadopago_id = $2 
+    RETURNING *`;
+
+  try {
+    const result = await pool.query(queryText, [
+      paymentInfo.status.toLowerCase(), // Normaliza o status
+      paymentInfo.id
+    ]);
+
+    if (result.rowCount === 0) {
+      throw new Error(`Pagamento não encontrado: ${paymentInfo.id}`);
+    }
+
+    return {
+      ...result.rows[0],
+      mercadopago_id: paymentInfo.id // Mantém compatibilidade
+    };
+
+  } catch (error) {
+    console.error('Erro na atualização:', error.message);
+    throw new Error(`Falha na atualização: ${error.message}`);
+  }
+}
+
+// Atualize a função getPaymentDetails
+async function getPaymentDetails(paymentId) {
+  try {
+    const response = await axios.get(`${MP_API_URL}/payments/${paymentId}`, {
+      headers: mpHeaders,
+      timeout: 5000
+    });
+
+    // Mapeamento completo do status
+    const statusMapping = {
+      'pending': 'pending',
+      'approved': 'approved',
+      'authorized': 'authorized',
+      'in_process': 'in_analysis',
+      'in_mediation': 'in_dispute',
+      'rejected': 'rejected',
+      'cancelled': 'canceled',
+      'refunded': 'refunded',
+      'charged_back': 'chargeback'
+    };
+
+    return {
+      ...response.data,
+      id: response.data.id,
+      status: statusMapping[response.data.status] || 'unknown',
+      amount: response.data.transaction_amount,
+      mercadopago_id: response.data.id
+    };
+
+  } catch (error) {
+    console.error('Falha ao obter detalhes do pagamento:', {
+      paymentId,
+      status: error.response?.status,
+      data: error.response?.data
+    });
+    throw new Error(`Erro na recuperação de dados: ${error.message}`);
+  }
+}
+
 router.post('/pix/webhook', express.json(), async (req, res) => {
   try {
     const pool = req.db;
