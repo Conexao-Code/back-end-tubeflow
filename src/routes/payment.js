@@ -81,22 +81,21 @@ router.get('/payments/:id/status', async (req, res) => {
   try {
     const payment = await getPaymentDetails(req.params.id);
     
-    // Adicione o amount na resposta
+    // Busca dados complementares do banco
+    const dbPayment = await req.db.query(
+      'SELECT plan_type, amount FROM payments WHERE mercadopago_id = $1',
+      [payment.id]
+    );
+
     const responseData = {
       payment_id: payment.id,
       status: payment.status,
       last_updated: payment.updated_at,
-      amount: payment.amount, // Certifique-se que esse campo existe na sua model
-      plan_type: payment.plan_type
+      amount: dbPayment.rows[0]?.amount || payment.amount,
+      plan_type: dbPayment.rows[0]?.plan_type || 'unknown'
     };
 
-    // Atualiza o status no banco de dados (se necessário)
-    const updatedPayment = await updatePaymentStatus(req.db, {
-      id: payment.id,
-      status: payment.status
-    });
-
-    res.json({ ...responseData, last_updated: updatedPayment.updated_at });
+    res.json(responseData);
 
   } catch (error) {
     console.error('Erro na verificação de status:', error);
@@ -160,12 +159,18 @@ async function getPaymentDetails(paymentId) {
       'charged_back': 'chargeback'
     };
 
+    // Busca detalhes do banco de dados
+    const dbPayment = await pool.query(
+      'SELECT plan_type FROM payments WHERE mercadopago_id = $1',
+      [paymentId]
+    );
+
     return {
       ...response.data,
       id: response.data.id,
       status: statusMapping[response.data.status] || 'unknown',
       amount: response.data.transaction_amount,
-      mercadopago_id: response.data.id
+      plan_type: dbPayment.rows[0]?.plan_type || 'unknown'
     };
 
   } catch (error) {
@@ -401,6 +406,11 @@ async function registerPayment(
   externalReference,
   planType
 ) {
+  console.log('Registrando pagamento com:', {
+    planType,
+    amount
+  });
+
   const queryText = `
     INSERT INTO payments (
       user_email,
