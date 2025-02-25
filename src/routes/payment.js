@@ -80,7 +80,7 @@ router.post('/create-payment', async (req, res) => {
 router.get('/payments/:id/status', async (req, res) => {
   try {
     const payment = await getPaymentDetails(req.params.id);
-    
+
     // Busca dados complementares do banco
     const dbPayment = await req.db.query(
       'SELECT plan_type, amount, user_email FROM payments WHERE mercadopago_id = $1',
@@ -117,6 +117,128 @@ router.get('/payments/:id/status', async (req, res) => {
       error: 'Erro ao verificar status do pagamento',
       details: error.message
     });
+  }
+});
+
+router.post('/create-account', async (req, res) => {
+  const { email, companyName, password, paymentId } = req.body;
+  const client = await req.db.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Validação de campos obrigatórios
+    if (!email || !companyName || !password || !paymentId) {
+      return res.status(400).json({
+        error: 'Todos os campos são obrigatórios',
+        fields: ['email', 'companyName', 'password', 'paymentId']
+      });
+    }
+
+    // Verifica se a empresa já existe
+    const companyCheck = await client.query(
+      'SELECT id FROM companies WHERE name = $1',
+      [companyName]
+    );
+
+    if (companyCheck.rowCount > 0) {
+      return res.status(409).json({
+        error: 'Empresa já cadastrada',
+        field: 'companyName'
+      });
+    }
+
+    // Cria a empresa
+    const companyResult = await client.query(
+      `INSERT INTO companies (name, subdomain, active)
+       VALUES ($1, $2, true)
+       RETURNING id, subdomain`,
+      [
+        companyName,
+        `${companyName.toLowerCase().replace(/[^a-z0-9]/g, '')}-${Math.random().toString(36).substring(2, 7)}`
+      ]
+    );
+
+    const companyId = companyResult.rows[0].id;
+
+    // Verifica se o usuário já existe na empresa
+    const userCheck = await client.query(
+      `SELECT id FROM users 
+       WHERE email = $1 AND company_id = $2`,
+      [email, companyId]
+    );
+
+    if (userCheck.rowCount > 0) {
+      return res.status(409).json({
+        error: 'Usuário já cadastrado nesta empresa',
+        field: 'email'
+      });
+    }
+
+    // Hash da senha
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Cria o usuário admin
+    const userResult = await client.query(
+      `INSERT INTO users (company_id, name, email, password, role)
+       VALUES ($1, $2, $3, $4, 'admin')
+       RETURNING id, role`,
+      [companyId, 'Administrador', email, hashedPassword]
+    );
+
+    // Atualiza o pagamento com a company_id
+    await client.query(
+      `UPDATE payments
+       SET company_id = $1
+       WHERE mercadopago_id = $2`,
+      [companyId, paymentId]
+    );
+
+    await client.query('COMMIT');
+
+    // Gera token JWT
+    const token = jwt.sign(
+      {
+        userId: userResult.rows[0].id,
+        companyId,
+        role: userResult.rows[0].role
+      },
+      config.JWT_SECRET, // Alterado de process.env para config
+      { expiresIn: '7d' }
+    );
+
+    res.json({
+      success: true,
+      token,
+      company: {
+        id: companyId,
+        name: companyName,
+        subdomain: companyResult.rows[0].subdomain
+      }
+    });
+
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Erro na criação de conta:', error);
+
+    // Tratamento específico para violação de constraint única
+    if (error.code === '23505') {
+      const field = error.constraint.includes('email') ? 'email' : 'companyName';
+      return res.status(409).json({
+        error: field === 'email'
+          ? 'E-mail já está em uso'
+          : 'Empresa já cadastrada',
+        field
+      });
+    }
+
+    res.status(500).json({
+      error: 'Erro ao criar conta',
+      details: error.message
+    });
+  } finally {
+    client.release();
   }
 });
 
@@ -338,8 +460,8 @@ async function handlePixPayment(client, res, dbPlan, userData) {
     });
 
     const statusCode = error.response?.status || 500;
-    const errorMessage = error.response?.data?.error === 'bad_request' 
-      ? 'Erro na validação dos dados' 
+    const errorMessage = error.response?.data?.error === 'bad_request'
+      ? 'Erro na validação dos dados'
       : 'Falha no processamento do pagamento';
 
     return res.status(statusCode).json({
@@ -356,8 +478,8 @@ function validatePaymentData(data) {
   if (!data.userData || !data.plan) return false;
 
   return cpfRegex.test(data.userData.cpf) &&
-         emailRegex.test(data.userData.email) &&
-         Object.values(PLAN_TYPES).includes(data.plan.type?.toLowerCase());
+    emailRegex.test(data.userData.email) &&
+    Object.values(PLAN_TYPES).includes(data.plan.type?.toLowerCase());
 }
 
 function verifyWebhookSignature(req) {

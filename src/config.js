@@ -32,7 +32,7 @@ module.exports = {
     port: process.env.PORT || 1100,
 
     baseUrl: 'https://apitubeflow.conexaocode.com',
-    
+    JWT_SECRET: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjoicmFuZG9tX3VzZXIiLCJleHAiOjE3NDA1MTc1MzV9.1SOKh5LCjaCywd27mzMzbitFW10T-62sydCEbrUH4Oo',
     allowedOrigins: [
         'http://localhost:5173',
         'http://localhost:3001',

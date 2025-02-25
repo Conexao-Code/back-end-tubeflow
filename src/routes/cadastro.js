@@ -3,8 +3,6 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt'); 
 const router = express.Router();
 
-const secretKey = '3be6f7a5b4f2cba801809e063afd9ab5f29bba6c694a9f40ac4c0cef57803b43'; 
-
 router.post('/register', async (req, res) => {
     const { name, email, password, role } = req.body;
 
