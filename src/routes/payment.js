@@ -79,13 +79,14 @@ router.post('/create-payment', async (req, res) => {
   }
 });
 
+// Rota GET /payments/:id/status
 router.get('/payments/:id/status', async (req, res) => {
   try {
     const payment = await getPaymentDetails(req.params.id);
 
-    // Busca dados complementares do banco
+    // Busca dados complementares do banco incluindo company_id e subscription_updated
     const dbPayment = await req.db.query(
-      'SELECT plan_type, amount, user_email FROM payments WHERE mercadopago_id = $1',
+      'SELECT plan_type, amount, user_email, company_id, subscription_updated FROM payments WHERE mercadopago_id = $1',
       [payment.id]
     );
 
@@ -102,13 +103,49 @@ router.get('/payments/:id/status', async (req, res) => {
       userExists = userCheck.rowCount > 0;
     }
 
+    // Lógica de atualização de assinatura
+    if (payment.status === 'approved' && paymentData.company_id && !paymentData.subscription_updated) {
+      try {
+        // Atualiza a assinatura da empresa
+        const companyUpdate = await req.db.query(
+          `UPDATE companies
+           SET 
+             subscription_end = CASE 
+               WHEN subscription_end < NOW() THEN NOW() + INTERVAL '1 month'
+               ELSE subscription_end + INTERVAL '1 month'
+             END,
+             subscription_start = CASE 
+               WHEN subscription_end < NOW() THEN NOW()
+               ELSE subscription_start
+             END
+           WHERE id = $1
+           RETURNING subscription_start, subscription_end`,
+          [paymentData.company_id]
+        );
+
+        // Marca o pagamento como processado
+        await req.db.query(
+          'UPDATE payments SET subscription_updated = TRUE WHERE mercadopago_id = $1',
+          [payment.id]
+        );
+
+        console.log('Assinatura estendida para a empresa:', paymentData.company_id);
+
+      } catch (updateError) {
+        console.error('Erro ao atualizar assinatura:', updateError);
+        // Não interrompe o fluxo principal, apenas registra o erro
+      }
+    }
+
     const responseData = {
       payment_id: payment.id,
       status: payment.status,
       last_updated: payment.updated_at,
       amount: paymentData.amount || payment.amount,
       plan_type: paymentData.plan_type || 'unknown',
-      user_exists: userExists
+      user_exists: userExists,
+      company_id: paymentData.company_id,
+      subscription_updated: paymentData.subscription_updated
     };
 
     res.json(responseData);
@@ -122,6 +159,7 @@ router.get('/payments/:id/status', async (req, res) => {
   }
 });
 
+// Rota POST /create-account
 router.post('/create-account', async (req, res) => {
   const { email, companyName, password, paymentId } = req.body;
   const client = await req.db.connect();
@@ -129,7 +167,7 @@ router.post('/create-account', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Validação de campos obrigatórios
+    // Validação de campos obrigatórios (mantido igual)
     const requiredFields = ['email', 'companyName', 'password', 'paymentId'];
     const missingFields = requiredFields.filter(field => !req.body[field]);
     
@@ -146,7 +184,7 @@ router.post('/create-account', async (req, res) => {
       });
     }
 
-    // Verifica existência da empresa
+    // Verificação de empresa (mantido igual)
     const companyCheck = await client.query(
       'SELECT id FROM companies WHERE name = $1',
       [companyName]
@@ -160,7 +198,7 @@ router.post('/create-account', async (req, res) => {
       });
     }
 
-    // Criação da empresa com subdomínio único
+    // Criação da empresa com assinatura
     const subdomainSuffix = Math.random().toString(36).substring(2, 7);
     const cleanCompanyName = companyName
       .toLowerCase()
@@ -168,15 +206,15 @@ router.post('/create-account', async (req, res) => {
       .substring(0, 20);
     
     const companyResult = await client.query(
-      `INSERT INTO companies (name, subdomain, active)
-       VALUES ($1, $2, true)
-       RETURNING id, subdomain`,
+      `INSERT INTO companies (name, subdomain, active, subscription_start, subscription_end)
+       VALUES ($1, $2, true, NOW(), NOW() + INTERVAL '1 month')
+       RETURNING id, subdomain, subscription_start, subscription_end`,
       [companyName, `${cleanCompanyName}-${subdomainSuffix}`]
     );
 
     const companyId = companyResult.rows[0].id;
 
-    // Verificação de usuário existente
+    // Verificação de usuário (mantido igual)
     const userCheck = await client.query(
       `SELECT id FROM users 
        WHERE email = $1 AND company_id = $2`,
@@ -194,11 +232,11 @@ router.post('/create-account', async (req, res) => {
       });
     }
 
-    // Hash de senha seguro
+    // Hash de senha (mantido igual)
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Criação do usuário admin
+    // Criação do usuário (mantido igual)
     const userResult = await client.query(
       `INSERT INTO users (company_id, name, email, password, role)
        VALUES ($1, $2, $3, $4, 'admin')
@@ -206,10 +244,10 @@ router.post('/create-account', async (req, res) => {
       [companyId, 'Administrador', email, hashedPassword]
     );
 
-    // Atualização segura do pagamento
+    // Atualização do pagamento com marcação de processado
     const paymentUpdate = await client.query(
       `UPDATE payments
-       SET company_id = $1
+       SET company_id = $1, subscription_updated = TRUE
        WHERE mercadopago_id = $2
        RETURNING id`,
       [companyId, paymentId]
@@ -221,7 +259,7 @@ router.post('/create-account', async (req, res) => {
 
     await client.query('COMMIT');
 
-    // Geração de token JWT seguro
+    // Geração de token (mantido igual)
     const token = jwt.sign(
       {
         userId: userResult.rows[0].id,
@@ -237,7 +275,7 @@ router.post('/create-account', async (req, res) => {
       }
     );
 
-    // Resposta formatada
+    // Resposta atualizada com dados de assinatura
     res.json({
       success: true,
       nextSteps: [
@@ -253,6 +291,8 @@ router.post('/create-account', async (req, res) => {
         id: companyId,
         name: companyName,
         subdomain: companyResult.rows[0].subdomain,
+        subscription_start: companyResult.rows[0].subscription_start,
+        subscription_end: companyResult.rows[0].subscription_end,
         onboardingStatus: "completed"
       },
       user: {
@@ -265,7 +305,6 @@ router.post('/create-account', async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     
-    // Log detalhado para diagnóstico
     console.error('Erro completo:', {
       message: error.message,
       stack: error.stack,
@@ -273,7 +312,7 @@ router.post('/create-account', async (req, res) => {
       timestamp: new Date().toISOString()
     });
 
-    // Tratamento de erros específicos
+    // Tratamento de erros (mantido igual)
     const errorResponse = {
       error: 'Erro no processo de criação',
       details: error.message,
