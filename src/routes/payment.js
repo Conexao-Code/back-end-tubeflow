@@ -83,16 +83,30 @@ router.get('/payments/:id/status', async (req, res) => {
     
     // Busca dados complementares do banco
     const dbPayment = await req.db.query(
-      'SELECT plan_type, amount FROM payments WHERE mercadopago_id = $1',
+      'SELECT plan_type, amount, user_email FROM payments WHERE mercadopago_id = $1',
       [payment.id]
     );
+
+    const paymentData = dbPayment.rows[0] || {};
+    const userEmail = paymentData.user_email;
+
+    // Verifica se o usuário existe
+    let userExists = false;
+    if (userEmail) {
+      const userCheck = await req.db.query(
+        'SELECT id FROM users WHERE email = $1',
+        [userEmail]
+      );
+      userExists = userCheck.rowCount > 0;
+    }
 
     const responseData = {
       payment_id: payment.id,
       status: payment.status,
       last_updated: payment.updated_at,
-      amount: dbPayment.rows[0]?.amount || payment.amount,
-      plan_type: dbPayment.rows[0]?.plan_type || 'unknown'
+      amount: paymentData.amount || payment.amount,
+      plan_type: paymentData.plan_type || 'unknown',
+      user_exists: userExists
     };
 
     res.json(responseData);
