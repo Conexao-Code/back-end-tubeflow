@@ -129,14 +129,23 @@ router.post('/create-account', async (req, res) => {
     await client.query('BEGIN');
 
     // Validação de campos obrigatórios
-    if (!email || !companyName || !password || !paymentId) {
+    const requiredFields = ['email', 'companyName', 'password', 'paymentId'];
+    const missingFields = requiredFields.filter(field => !req.body[field]);
+    
+    if (missingFields.length > 0) {
       return res.status(400).json({
         error: 'Todos os campos são obrigatórios',
-        fields: ['email', 'companyName', 'password', 'paymentId']
+        missingFields,
+        exampleRequest: {
+          email: "user@example.com",
+          companyName: "Empresa XYZ",
+          password: "senhaSegura123",
+          paymentId: "123456789"
+        }
       });
     }
 
-    // Verifica se a empresa já existe
+    // Verifica existência da empresa
     const companyCheck = await client.query(
       'SELECT id FROM companies WHERE name = $1',
       [companyName]
@@ -145,24 +154,28 @@ router.post('/create-account', async (req, res) => {
     if (companyCheck.rowCount > 0) {
       return res.status(409).json({
         error: 'Empresa já cadastrada',
+        solution: "Tente um nome diferente ou entre em contato com o suporte",
         field: 'companyName'
       });
     }
 
-    // Cria a empresa
+    // Criação da empresa com subdomínio único
+    const subdomainSuffix = Math.random().toString(36).substring(2, 7);
+    const cleanCompanyName = companyName
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '')
+      .substring(0, 20);
+    
     const companyResult = await client.query(
       `INSERT INTO companies (name, subdomain, active)
        VALUES ($1, $2, true)
        RETURNING id, subdomain`,
-      [
-        companyName,
-        `${companyName.toLowerCase().replace(/[^a-z0-9]/g, '')}-${Math.random().toString(36).substring(2, 7)}`
-      ]
+      [companyName, `${cleanCompanyName}-${subdomainSuffix}`]
     );
 
     const companyId = companyResult.rows[0].id;
 
-    // Verifica se o usuário já existe na empresa
+    // Verificação de usuário existente
     const userCheck = await client.query(
       `SELECT id FROM users 
        WHERE email = $1 AND company_id = $2`,
@@ -172,15 +185,19 @@ router.post('/create-account', async (req, res) => {
     if (userCheck.rowCount > 0) {
       return res.status(409).json({
         error: 'Usuário já cadastrado nesta empresa',
+        resolutionSteps: [
+          "Recupere sua senha caso já possua cadastro",
+          "Utilize um e-mail diferente"
+        ],
         field: 'email'
       });
     }
 
-    // Hash da senha
+    // Hash de senha seguro
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Cria o usuário admin
+    // Criação do usuário admin
     const userResult = await client.query(
       `INSERT INTO users (company_id, name, email, password, role)
        VALUES ($1, $2, $3, $4, 'admin')
@@ -188,56 +205,93 @@ router.post('/create-account', async (req, res) => {
       [companyId, 'Administrador', email, hashedPassword]
     );
 
-    // Atualiza o pagamento com a company_id
-    await client.query(
+    // Atualização segura do pagamento
+    const paymentUpdate = await client.query(
       `UPDATE payments
        SET company_id = $1
-       WHERE mercadopago_id = $2`,
+       WHERE mercadopago_id = $2
+       RETURNING id`,
       [companyId, paymentId]
     );
 
+    if (paymentUpdate.rowCount === 0) {
+      throw new Error(`Pagamento não encontrado: ${paymentId}`);
+    }
+
     await client.query('COMMIT');
 
-    // Gera token JWT
+    // Geração de token JWT seguro
     const token = jwt.sign(
       {
         userId: userResult.rows[0].id,
         companyId,
-        role: userResult.rows[0].role
+        role: userResult.rows[0].role,
+        iss: "api.tubeflow",
+        aud: "client.tubeflow"
       },
-      config.JWT_SECRET, // Alterado de process.env para config
-      { expiresIn: '7d' }
+      config.JWT_SECRET,
+      { 
+        expiresIn: '7d',
+        algorithm: 'HS256'
+      }
     );
 
+    // Resposta formatada
     res.json({
       success: true,
-      token,
+      nextSteps: [
+        "Armazene o token de acesso localmente",
+        "Utilize o token em cabeçalhos Authorization: Bearer <token>"
+      ],
+      token: {
+        value: token,
+        expiresIn: "7 dias",
+        type: "Bearer"
+      },
       company: {
         id: companyId,
         name: companyName,
-        subdomain: companyResult.rows[0].subdomain
+        subdomain: companyResult.rows[0].subdomain,
+        onboardingStatus: "completed"
+      },
+      user: {
+        id: userResult.rows[0].id,
+        email: email,
+        role: "admin"
       }
     });
 
   } catch (error) {
     await client.query('ROLLBACK');
-    console.error('Erro na criação de conta:', error);
+    
+    // Log detalhado para diagnóstico
+    console.error('Erro completo:', {
+      message: error.message,
+      stack: error.stack,
+      body: req.body,
+      timestamp: new Date().toISOString()
+    });
 
-    // Tratamento específico para violação de constraint única
+    // Tratamento de erros específicos
+    const errorResponse = {
+      error: 'Erro no processo de criação',
+      details: error.message,
+      systemAction: "Rollback completo realizado",
+      userAction: [
+        "Verifique os dados enviados",
+        "Tente novamente em alguns minutos"
+      ]
+    };
+
     if (error.code === '23505') {
-      const field = error.constraint.includes('email') ? 'email' : 'companyName';
-      return res.status(409).json({
-        error: field === 'email'
-          ? 'E-mail já está em uso'
-          : 'Empresa já cadastrada',
-        field
-      });
+      errorResponse.error = "Conflito de dados únicos";
+      errorResponse.field = error.constraint.includes('email') 
+        ? 'email' 
+        : 'companyName';
+      errorResponse.status = 409;
     }
 
-    res.status(500).json({
-      error: 'Erro ao criar conta',
-      details: error.message
-    });
+    res.status(errorResponse.status || 500).json(errorResponse);
   } finally {
     client.release();
   }
