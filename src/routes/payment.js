@@ -79,21 +79,21 @@ router.post('/create-payment', async (req, res) => {
   }
 });
 
-// Rota GET /payments/:id/status
 router.get('/payments/:id/status', async (req, res) => {
   try {
     const payment = await getPaymentDetails(req.params.id);
 
-    // Busca dados complementares do banco incluindo company_id e subscription_updated
     const dbPayment = await req.db.query(
-      'SELECT plan_type, amount, user_email, company_id, subscription_updated FROM payments WHERE mercadopago_id = $1',
+      `SELECT plan_type, amount, user_email, company_id, subscription_updated 
+       FROM payments 
+       WHERE mercadopago_id = $1`,
       [payment.id]
     );
 
     const paymentData = dbPayment.rows[0] || {};
     const userEmail = paymentData.user_email;
 
-    // Verifica se o usuário existe
+    // Verificação de existência do usuário
     let userExists = false;
     if (userEmail) {
       const userCheck = await req.db.query(
@@ -106,34 +106,60 @@ router.get('/payments/:id/status', async (req, res) => {
     // Lógica de atualização de assinatura
     if (payment.status === 'approved' && paymentData.company_id && !paymentData.subscription_updated) {
       try {
-        // Atualiza a assinatura da empresa
+        // Mapeamento de intervalos
+        const planIntervalMap = {
+          monthly: '1 month',
+          quarterly: '3 months',
+          annual: '1 year'
+        };
+
+        // Determinar intervalo do plano
+        const rawPlanType = paymentData.plan_type?.toLowerCase() || 'monthly';
+        const planType = Object.keys(planIntervalMap).includes(rawPlanType) 
+          ? rawPlanType 
+          : 'monthly';
+        
+        const interval = planIntervalMap[planType];
+
+        // Atualizar assinatura com transação
+        await req.db.query('BEGIN');
+        
         const companyUpdate = await req.db.query(
           `UPDATE companies
            SET 
              subscription_end = CASE 
-               WHEN subscription_end < NOW() THEN NOW() + INTERVAL '1 month'
-               ELSE subscription_end + INTERVAL '1 month'
+               WHEN subscription_end IS NULL THEN NOW() + $1::interval
+               WHEN subscription_end < NOW() THEN NOW() + $1::interval
+               ELSE subscription_end + $1::interval
              END,
              subscription_start = CASE 
                WHEN subscription_end < NOW() THEN NOW()
                ELSE subscription_start
              END
-           WHERE id = $1
-           RETURNING subscription_start, subscription_end`,
-          [paymentData.company_id]
+           WHERE id = $2
+           RETURNING *`,
+          [interval, paymentData.company_id]
         );
 
-        // Marca o pagamento como processado
+        // Marcar pagamento como processado
         await req.db.query(
-          'UPDATE payments SET subscription_updated = TRUE WHERE mercadopago_id = $1',
+          `UPDATE payments 
+           SET subscription_updated = TRUE 
+           WHERE mercadopago_id = $1`,
           [payment.id]
         );
 
-        console.log('Assinatura estendida para a empresa:', paymentData.company_id);
+        await req.db.query('COMMIT');
+        
+        console.log(`Assinatura ${planType} atualizada para empresa ${paymentData.company_id}`);
 
       } catch (updateError) {
-        console.error('Erro ao atualizar assinatura:', updateError);
-        // Não interrompe o fluxo principal, apenas registra o erro
+        await req.db.query('ROLLBACK');
+        console.error('Erro na transação de assinatura:', {
+          error: updateError.message,
+          paymentId: payment.id,
+          companyId: paymentData.company_id
+        });
       }
     }
 
@@ -145,21 +171,26 @@ router.get('/payments/:id/status', async (req, res) => {
       plan_type: paymentData.plan_type || 'unknown',
       user_exists: userExists,
       company_id: paymentData.company_id,
-      subscription_updated: paymentData.subscription_updated
+      subscription_updated: paymentData.subscription_updated,
+      subscription_action: payment.status === 'approved' ? 'processed' : 'none'
     };
 
     res.json(responseData);
 
   } catch (error) {
-    console.error('Erro na verificação de status:', error);
+    console.error('Erro completo na verificação de status:', {
+      message: error.message,
+      stack: error.stack,
+      params: req.params
+    });
+    
     res.status(500).json({
-      error: 'Erro ao verificar status do pagamento',
-      details: error.message
+      error: 'Falha na verificação do pagamento',
+      technical_details: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 });
 
-// Rota POST /create-account
 router.post('/create-account', async (req, res) => {
   const { email, companyName, password, paymentId } = req.body;
   const client = await req.db.connect();
@@ -167,54 +198,104 @@ router.post('/create-account', async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    // Validação de campos obrigatórios (mantido igual)
+    // Validação completa dos campos
     const requiredFields = ['email', 'companyName', 'password', 'paymentId'];
     const missingFields = requiredFields.filter(field => !req.body[field]);
     
     if (missingFields.length > 0) {
+      await client.query('ROLLBACK');
       return res.status(400).json({
-        error: 'Todos os campos são obrigatórios',
-        missingFields,
-        exampleRequest: {
-          email: "user@example.com",
-          companyName: "Empresa XYZ",
-          password: "senhaSegura123",
-          paymentId: "123456789"
+        error: 'Dados incompletos',
+        missing_fields: missingFields,
+        example_correction: {
+          email: "usuario@empresa.com",
+          companyName: "Empresa Exemplo Ltda",
+          password: "SenhaSegura@123",
+          paymentId: "PAY-123456789"
         }
       });
     }
 
-    // Verificação de empresa (mantido igual)
+    // Verificação de empresa existente
     const companyCheck = await client.query(
       'SELECT id FROM companies WHERE name = $1',
       [companyName]
     );
 
     if (companyCheck.rowCount > 0) {
+      await client.query('ROLLBACK');
       return res.status(409).json({
-        error: 'Empresa já cadastrada',
-        solution: "Tente um nome diferente ou entre em contato com o suporte",
-        field: 'companyName'
+        error: 'Empresa já registrada',
+        suggested_actions: [
+          "Utilize um nome comercial diferente",
+          "Entre em contato para fusão de contas"
+        ],
+        contact_support: "suporte@tubeflow.com"
       });
     }
 
-    // Criação da empresa com assinatura
-    const subdomainSuffix = Math.random().toString(36).substring(2, 7);
-    const cleanCompanyName = companyName
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '')
-      .substring(0, 20);
-    
-    const companyResult = await client.query(
-      `INSERT INTO companies (name, subdomain, active, subscription_start, subscription_end)
-       VALUES ($1, $2, true, NOW(), NOW() + INTERVAL '1 month')
-       RETURNING id, subdomain, subscription_start, subscription_end`,
-      [companyName, `${cleanCompanyName}-${subdomainSuffix}`]
+    // Obter detalhes do pagamento
+    const paymentDetails = await client.query(
+      `SELECT plan_type, amount 
+       FROM payments 
+       WHERE mercadopago_id = $1 
+       FOR UPDATE`,
+      [paymentId]
     );
 
-    const companyId = companyResult.rows[0].id;
+    if (paymentDetails.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({
+        error: 'Pagamento não localizado',
+        actions: [
+          "Verifique o ID do pagamento",
+          "Aguarde 15 minutos para processamento"
+        ]
+      });
+    }
 
-    // Verificação de usuário (mantido igual)
+    // Configurar intervalo inicial
+    const planData = paymentDetails.rows[0];
+    const intervalMap = {
+      monthly: '1 month',
+      quarterly: '3 months',
+      annual: '1 year'
+    };
+    
+    const planType = planData.plan_type?.toLowerCase() in intervalMap 
+      ? planData.plan_type.toLowerCase() 
+      : 'monthly';
+    
+    const subscriptionInterval = intervalMap[planType];
+
+    // Criar subdomínio único
+    const cleanCompanyName = companyName
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // Remover acentos
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '-')
+      .replace(/-+/g, '-')
+      .substring(0, 20);
+    
+    const subdomainSuffix = Math.random().toString(36).slice(2, 6);
+    const finalSubdomain = `${cleanCompanyName}-${subdomainSuffix}`;
+
+    // Inserir empresa com intervalo correto
+    const companyResult = await client.query(
+      `INSERT INTO companies (
+        name, 
+        subdomain, 
+        active, 
+        subscription_start, 
+        subscription_end
+      ) VALUES ($1, $2, TRUE, NOW(), NOW() + $3::interval)
+      RETURNING id, subdomain, subscription_start, subscription_end`,
+      [companyName, finalSubdomain, subscriptionInterval]
+    );
+
+    const companyData = companyResult.rows[0];
+    const companyId = companyData.id;
+
+    // Verificar usuário existente na nova empresa
     const userCheck = await client.query(
       `SELECT id FROM users 
        WHERE email = $1 AND company_id = $2`,
@@ -222,116 +303,132 @@ router.post('/create-account', async (req, res) => {
     );
 
     if (userCheck.rowCount > 0) {
+      await client.query('ROLLBACK');
       return res.status(409).json({
-        error: 'Usuário já cadastrado nesta empresa',
-        resolutionSteps: [
-          "Recupere sua senha caso já possua cadastro",
-          "Utilize um e-mail diferente"
-        ],
-        field: 'email'
+        error: 'Colaborador já registrado',
+        resolution_steps: [
+          "Solicite acesso ao administrador da empresa",
+          "Utilize a recuperação de senha"
+        ]
       });
     }
 
-    // Hash de senha (mantido igual)
-    const saltRounds = 10;
+    // Criptografia de senha
+    const saltRounds = 12;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Criação do usuário (mantido igual)
+    // Criar usuário admin
     const userResult = await client.query(
-      `INSERT INTO users (company_id, name, email, password, role)
-       VALUES ($1, $2, $3, $4, 'admin')
-       RETURNING id, role`,
-      [companyId, 'Administrador', email, hashedPassword]
+      `INSERT INTO users (
+        company_id, 
+        name, 
+        email, 
+        password, 
+        role,
+        is_active
+      ) VALUES ($1, $2, $3, $4, 'admin', TRUE)
+      RETURNING id, created_at`,
+      [companyId, 'Administrador Principal', email, hashedPassword]
     );
 
-    // Atualização do pagamento com marcação de processado
+    // Vincular pagamento à empresa
     const paymentUpdate = await client.query(
       `UPDATE payments
-       SET company_id = $1, subscription_updated = TRUE
+       SET 
+         company_id = $1,
+         subscription_updated = TRUE,
+         updated_at = NOW()
        WHERE mercadopago_id = $2
        RETURNING id`,
       [companyId, paymentId]
     );
 
     if (paymentUpdate.rowCount === 0) {
-      throw new Error(`Pagamento não encontrado: ${paymentId}`);
+      throw new Error(`Falha ao vincular pagamento ${paymentId} à empresa ${companyId}`);
     }
 
     await client.query('COMMIT');
 
-    // Geração de token (mantido igual)
+    // Gerar token JWT seguro
+    const tokenPayload = {
+      uid: userResult.rows[0].id,
+      cid: companyId,
+      rol: 'admin',
+      sub: finalSubdomain,
+      plan: planType
+    };
+
     const token = jwt.sign(
-      {
-        userId: userResult.rows[0].id,
-        companyId,
-        role: userResult.rows[0].role,
-        iss: "api.tubeflow",
-        aud: "client.tubeflow"
-      },
+      tokenPayload,
       config.JWT_SECRET,
-      { 
+      {
         expiresIn: '7d',
+        issuer: 'api.tubeflow',
+        audience: 'client.tubeflow',
         algorithm: 'HS256'
       }
     );
 
-    // Resposta atualizada com dados de assinatura
-    res.json({
+    // Montar resposta final
+    res.status(201).json({
       success: true,
-      nextSteps: [
-        "Armazene o token de acesso localmente",
-        "Utilize o token em cabeçalhos Authorization: Bearer <token>"
-      ],
-      token: {
-        value: token,
-        expiresIn: "7 dias",
-        type: "Bearer"
+      authentication: {
+        token: {
+          value: token,
+          type: 'Bearer',
+          expires_in: '7d'
+        },
+        renewal_info: {
+          next_renewal: companyData.subscription_end,
+          plan_type: planType
+        }
       },
       company: {
         id: companyId,
         name: companyName,
-        subdomain: companyResult.rows[0].subdomain,
-        subscription_start: companyResult.rows[0].subscription_start,
-        subscription_end: companyResult.rows[0].subscription_end,
-        onboardingStatus: "completed"
+        subdomain: companyData.subdomain,
+        subscription_status: {
+          start: companyData.subscription_start,
+          end: companyData.subscription_end,
+          active: true
+        }
       },
       user: {
         id: userResult.rows[0].id,
         email: email,
-        role: "admin"
+        role: 'admin',
+        initial_setup: true
       }
     });
 
   } catch (error) {
     await client.query('ROLLBACK');
     
-    console.error('Erro completo:', {
+    const errorId = uuidv4();
+    console.error(`Erro [${errorId}] em create-account:`, {
       message: error.message,
       stack: error.stack,
       body: req.body,
-      timestamp: new Date().toISOString()
+      time: new Date().toISOString()
     });
 
-    // Tratamento de erros (mantido igual)
-    const errorResponse = {
-      error: 'Erro no processo de criação',
-      details: error.message,
-      systemAction: "Rollback completo realizado",
-      userAction: [
-        "Verifique os dados enviados",
-        "Tente novamente em alguns minutos"
+    const response = {
+      error: 'Falha no processo de criação',
+      reference_id: errorId,
+      user_action: [
+        "Verifique os dados fornecidos",
+        "Tente novamente em 5 minutos"
       ]
     };
 
     if (error.code === '23505') {
-      errorResponse.error = "Conflito de dados únicos";
-      errorResponse.field = error.constraint.includes('email') 
-        ? 'email' 
-        : 'companyName';
-      errorResponse.status = 409;
+      response.error = 'Conflito de dados únicos';
+      response.details = error.constraint.includes('email') 
+        ? 'E-mail já registrado' 
+        : 'Identificador único duplicado';
     }
 
-    res.status(errorResponse.status || 500).json(errorResponse);
+    res.status(error.statusCode || 500).json(response);
   } finally {
     client.release();
   }
