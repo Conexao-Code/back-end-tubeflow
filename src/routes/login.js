@@ -20,29 +20,61 @@ router.post('/login', async (req, res) => {
   
       let [rows] = await connection.query('SELECT * FROM users WHERE email = ?', [email]);
       let isFreelancer = false;
-  
+      let userType = 'user';
+
       if (rows.length === 0) {
         [rows] = await connection.query('SELECT * FROM freelancers WHERE email = ?', [email]);
         isFreelancer = rows.length > 0;
+        userType = 'freelancer';
       }
   
-      connection.release();
-  
       if (rows.length === 0) {
+        connection.release();
         return res.status(401).json({ message: 'E-mail ou senha inválidos.' });
       }
   
       const user = rows[0];
-  
       const passwordMatch = await bcrypt.compare(password, user.password);
+      
       if (!passwordMatch) {
+        connection.release();
         return res.status(401).json({ message: 'E-mail ou senha inválidos.' });
       }
+
+      // Verificar empresa apenas para usuários normais
+      let company = null;
+      if (userType === 'user') {
+        const [companyRows] = await connection.query(`
+          SELECT c.id, c.active, c.subscription_end 
+          FROM companies c 
+          WHERE c.id = ?
+        `, [user.company_id]);
+
+        if (companyRows.length === 0) {
+          connection.release();
+          return res.status(403).json({ message: 'Usuário não vinculado a uma empresa válida.' });
+        }
+
+        company = companyRows[0];
+        
+        if (!company.active) {
+          connection.release();
+          return res.status(403).json({ message: 'Empresa inativa.' });
+        }
+
+        if (new Date(company.subscription_end) < new Date()) {
+          connection.release();
+          return res.status(403).json({ message: 'Assinatura da empresa expirada.' });
+        }
+      }
+
+      connection.release();
   
       const tokenPayload = {
         id: user.id,
         role: user.role,
         isFreelancer,
+        companyId: user.company_id || null
       };
   
       const token = jwt.sign(tokenPayload, secretKey, { expiresIn: '1h' });
@@ -53,12 +85,16 @@ router.post('/login', async (req, res) => {
         role: user.role,
         isFreelancer,
         id: user.id,
+        companyId: user.company_id || null,
+        companyActive: company ? company.active : true,
+        subscriptionValid: company ? new Date(company.subscription_end) >= new Date() : true
       });
     } catch (error) {
       console.error('Erro no login:', error);
       res.status(500).json({ message: 'Erro ao processar o login.' });
     }
-  });
+});
+
 router.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
 
