@@ -3,25 +3,26 @@ const router = express.Router();
 
 // Obter configurações do sistema por empresa
 router.get('/settings', async (req, res) => {
+    let client;
     try {
-        const connection = await req.db.getConnection();
         const companyId = req.query.companyId;
 
         if (!companyId) {
             return res.status(400).json({ message: 'Company ID é obrigatório' });
         }
 
-        const [settings] = await connection.query(
+        // Obter cliente do pool PostgreSQL
+        client = await req.db.connect();
+        
+        const result = await client.query(
             `SELECT api_key, sender_phone, message_template, auto_notify 
              FROM settings 
-             WHERE company_id = ?
+             WHERE company_id = $1
              LIMIT 1`,
             [companyId]
         );
 
-        connection.release();
-
-        if (settings.length === 0) {
+        if (result.rows.length === 0) {
             return res.json({ 
                 api_key: '', 
                 sender_phone: '', 
@@ -30,72 +31,77 @@ router.get('/settings', async (req, res) => {
             });
         }
 
-        res.json(settings[0]);
+        res.json(result.rows[0]);
     } catch (error) {
         console.error('Erro ao buscar configurações:', error);
         res.status(500).json({ message: 'Erro ao buscar configurações.' });
+    } finally {
+        if (client) client.release();
     }
 });
 
 // Atualizar configurações por empresa
 router.post('/settings', async (req, res) => {
+    let client;
     try {
-        const connection = await req.db.getConnection();
         const { companyId, apiKey, senderPhone, messageTemplate, autoNotify } = req.body;
 
         if (!companyId) {
             return res.status(400).json({ message: 'Company ID é obrigatório' });
         }
 
+        // Obter cliente do pool PostgreSQL
+        client = await req.db.connect();
+
         // Verifica configurações existentes
-        const [existingSettings] = await connection.query(
-            `SELECT id FROM settings WHERE company_id = ? LIMIT 1`,
+        const checkResult = await client.query(
+            `SELECT company_id FROM settings WHERE company_id = $1 LIMIT 1`,
             [companyId]
         );
 
-        if (existingSettings.length === 0) {
+        if (checkResult.rows.length === 0) {
             // Inserir nova configuração
-            await connection.query(
+            await client.query(
                 `INSERT INTO settings (
                     company_id, 
                     api_key, 
                     sender_phone, 
                     message_template, 
                     auto_notify
-                ) VALUES (?, ?, ?, ?, ?)`,
+                ) VALUES ($1, $2, $3, $4, $5)`,
                 [
                     companyId,
                     apiKey || '', 
                     senderPhone || '', 
                     messageTemplate.replace(/\r\n|\r|\n/g, '\\n') || '', 
-                    autoNotify ? 1 : 0
+                    autoNotify
                 ]
             );
         } else {
             // Atualizar configuração existente
-            await connection.query(
+            await client.query(
                 `UPDATE settings 
-                 SET api_key = ?, 
-                     sender_phone = ?, 
-                     message_template = ?, 
-                     auto_notify = ? 
-                 WHERE company_id = ?`,
+                 SET api_key = $1, 
+                     sender_phone = $2, 
+                     message_template = $3, 
+                     auto_notify = $4 
+                 WHERE company_id = $5`,
                 [
                     apiKey || '', 
                     senderPhone || '', 
                     messageTemplate.replace(/\r\n|\r|\n/g, '\\n') || '', 
-                    autoNotify ? 1 : 0,
+                    autoNotify,
                     companyId
                 ]
             );
         }
 
-        connection.release();
         res.json({ message: 'Configurações atualizadas com sucesso.' });
-
     } catch (error) {
         console.error('Erro ao atualizar configurações:', error);
         res.status(500).json({ message: 'Erro ao atualizar configurações.' });
+    } finally {
+        if (client) client.release();
     }
 });
 
