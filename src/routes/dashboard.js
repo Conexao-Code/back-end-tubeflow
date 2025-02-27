@@ -44,23 +44,21 @@ router.get('/dashboard', async (req, res) => {
             AND company_id = $1
         `;
 
-        // 4. Consulta Canais Gerenciados
         const managedChannelsQuery = `
             SELECT COUNT(*) AS "managedChannels" 
             FROM channels 
             WHERE company_id = $1
         `;
 
-        // 5. Consulta Atividades Recentes
         let recentActivitiesQuery = `
             SELECT 
                 vl.id, 
                 u.name AS "user", 
                 vl.action, 
                 v.title AS "content", 
-                vl.from_status AS "fromStatus", 
-                vl.to_status AS "toStatus", 
-                EXTRACT(EPOCH FROM (NOW() - vl.timestamp)) / 60 AS "minutesAgo"
+                vl.old_status AS "fromStatus", 
+                vl.new_status AS "toStatus",   
+                EXTRACT(EPOCH FROM (NOW() - vl.created_at)) / 60 AS "minutesAgo"  
             FROM video_logs vl
             JOIN users u ON vl.user_id = u.id
             JOIN videos v ON vl.video_id = v.id
@@ -79,7 +77,7 @@ router.get('/dashboard', async (req, res) => {
                 )`;
         }
 
-        recentActivitiesQuery += ' ORDER BY vl.timestamp DESC LIMIT 5';
+        recentActivitiesQuery += ' ORDER BY vl.created_at DESC LIMIT 5';
 
         // Configuração dos parâmetros
         const videosInProgressParams = isUser ? [companyId] : [userId, companyId];
