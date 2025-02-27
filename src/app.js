@@ -2,8 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const app = express();
 const cors = require('cors');
-const { port } = require('./config');
-const { pool } = require('./config/database');
+const { port, allowedOrigins } = require('./config');
+const { connect } = require('./config/database');
 const Login = require('./routes/login');
 const Cadastro = require('./routes/cadastro');
 const RegisterFreelancer = require('./routes/registerfreelancer');
@@ -17,7 +17,8 @@ const Admin = require('./routes/admin');
 const Payment = require('./routes/payment');
 
 async function main() {
-    // Configurações básicas do Express
+    const pool = await connect();
+
     app.use(cors({
         origin: '*',
         optionsSuccessStatus: 200
@@ -25,13 +26,11 @@ async function main() {
 
     app.use(express.json());
 
-    // Middleware para injetar o pool do PostgreSQL
     app.use('/api', (req, res, next) => {
         req.db = pool;
         next();
     });
 
-    // Rotas
     app.use('/api', Login);
     app.use('/api', Cadastro);
     app.use('/api', RegisterFreelancer);
@@ -44,21 +43,9 @@ async function main() {
     app.use('/api', Reports);
     app.use('/api', Payment);
 
-    // Teste de conexão com o banco
-    try {
-        await pool.query('SELECT NOW()');
-        console.log('Conexão com PostgreSQL estabelecida com sucesso!');
-    } catch (error) {
-        console.error('Erro na conexão com PostgreSQL:', error);
-    }
-
-    // Inicia o servidor
-    app.listen(port, () => {
+    app.listen(port, async () => {
         console.log(`Servidor rodando na porta ${port}`);
     });
 }
 
-main().catch(error => {
-    console.error('Erro crítico na inicialização:', error);
-    process.exit(1);
-});
+main().catch(console.error);
