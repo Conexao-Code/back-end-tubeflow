@@ -1,15 +1,22 @@
 const express = require('express');
 const router = express.Router();
 
-// Obter configurações do sistema (única)
+// Obter configurações do sistema por empresa
 router.get('/settings', async (req, res) => {
     try {
         const connection = await req.db.getConnection();
+        const companyId = req.query.companyId;
+
+        if (!companyId) {
+            return res.status(400).json({ message: 'Company ID é obrigatório' });
+        }
 
         const [settings] = await connection.query(
             `SELECT api_key, sender_phone, message_template, auto_notify 
              FROM settings 
-             LIMIT 1`
+             WHERE company_id = ?
+             LIMIT 1`,
+            [companyId]
         );
 
         connection.release();
@@ -30,31 +37,56 @@ router.get('/settings', async (req, res) => {
     }
 });
 
-// Atualizar configurações do sistema (única)
+// Atualizar configurações por empresa
 router.post('/settings', async (req, res) => {
     try {
         const connection = await req.db.getConnection();
-        const { apiKey, senderPhone, messageTemplate, autoNotify } = req.body;
+        const { companyId, apiKey, senderPhone, messageTemplate, autoNotify } = req.body;
 
-        // Primeiro, verifica se já existe uma configuração
+        if (!companyId) {
+            return res.status(400).json({ message: 'Company ID é obrigatório' });
+        }
+
+        // Verifica configurações existentes
         const [existingSettings] = await connection.query(
-            `SELECT id FROM settings LIMIT 1`
+            `SELECT id FROM settings WHERE company_id = ? LIMIT 1`,
+            [companyId]
         );
 
         if (existingSettings.length === 0) {
-            // Se não existe, insere um novo registro
+            // Inserir nova configuração
             await connection.query(
-                `INSERT INTO settings (id, api_key, sender_phone, message_template, auto_notify)
-                 VALUES (1, ?, ?, ?, ?)`,
-                [apiKey || '', senderPhone || '', messageTemplate.replace(/\r\n|\r|\n/g, '\\n') || '', autoNotify ? 1 : 0]
+                `INSERT INTO settings (
+                    company_id, 
+                    api_key, 
+                    sender_phone, 
+                    message_template, 
+                    auto_notify
+                ) VALUES (?, ?, ?, ?, ?)`,
+                [
+                    companyId,
+                    apiKey || '', 
+                    senderPhone || '', 
+                    messageTemplate.replace(/\r\n|\r|\n/g, '\\n') || '', 
+                    autoNotify ? 1 : 0
+                ]
             );
         } else {
-            // Se já existe, atualiza o registro existente
+            // Atualizar configuração existente
             await connection.query(
                 `UPDATE settings 
-                 SET api_key = ?, sender_phone = ?, message_template = ?, auto_notify = ? 
-                 WHERE id = 1`,
-                [apiKey || '', senderPhone || '', messageTemplate.replace(/\r\n|\r|\n/g, '\\n') || '', autoNotify ? 1 : 0]
+                 SET api_key = ?, 
+                     sender_phone = ?, 
+                     message_template = ?, 
+                     auto_notify = ? 
+                 WHERE company_id = ?`,
+                [
+                    apiKey || '', 
+                    senderPhone || '', 
+                    messageTemplate.replace(/\r\n|\r|\n/g, '\\n') || '', 
+                    autoNotify ? 1 : 0,
+                    companyId
+                ]
             );
         }
 
