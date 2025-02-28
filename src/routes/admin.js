@@ -3,146 +3,304 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const { Pool } = require('pg');
+const config = require('../config');
 const router = express.Router();
 
+const pool = new Pool(config.dbConfig.postgres);
 
-router.get('/administrators', async (req, res) => {
-    let connection
-    try {
-        connection = await req.db.getConnection()
-        const [rows] = await connection.query(
-            "SELECT id, name, email, created_at AS createdAt FROM users WHERE role = 'admin'"
-        )
-        connection.release()
-        res.json({ data: rows })
-    } catch (error) {
-        if (connection) connection.release()
-        res.status(500).json({ message: 'Erro ao buscar administradores.' })
-    }
-})
-
-
-function generateRandomPassword(length = 8) {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
-    let password = ''
-    for (let i = 0; i < length; i++) {
-        password += chars.charAt(Math.floor(Math.random() * chars.length))
-    }
-    return password
-}
+router.use((req, res, next) => {
+  req.db = pool;
+  next();
+});
 
 const transporter = nodemailer.createTransport({
     host: 'smtp.hostinger.com',
-    port: 587,
+    port: 465,
+    secure: true,
     auth: {
         user: 'contato@conexaocode.com',
         pass: '#Henrique1312'
     }
 });
 
-router.post('/register-administrator', async (req, res) => {
-    const { name, email } = req.body
-    const randomPassword = generateRandomPassword(8)
-    let connection
-    try {
-      connection = await req.db.getConnection()
-      const hashedPassword = await bcrypt.hash(randomPassword, 10)
-      await connection.query(
-        "INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, 'admin')",
-        [name, email, hashedPassword]
-      )
-      connection.release()
-  
-      const mailOptions = {
-        from: '"Equipe TubeFlow" <contato@conexaocode.com>',
-        to: email,
-        subject: 'Cadastro de Administrador',
-        html: `
-          <!DOCTYPE html>
-          <html>
-            <head>
-              <meta charset="UTF-8">
-              <title>Cadastro de Administrador</title>
-            </head>
-            <body style="margin: 0; padding: 0; background-color: #F3F4F6;">
-              <table align="center" border="0" cellpadding="0" cellspacing="0" width="600" style="border-collapse: collapse;">
-                <tr>
-                  <td align="center" bgcolor="#1D4ED8" style="padding: 40px 0; color: #ffffff; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 24px;">
-                    <strong>TubeFlow</strong>
-                  </td>
-                </tr>
-                <tr>
-                  <td bgcolor="#ffffff" style="padding: 40px 30px; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 16px; line-height: 24px; color: #333333;">
-                    <p style="margin: 0;">Olá ${name},</p>
-                    <p style="margin: 20px 0 0 0;">Seu cadastro como administrador foi realizado com sucesso.</p>
-                    <p style="margin: 20px 0 0 0;">Segue sua senha de acesso: <strong>${randomPassword}</strong></p>
-                    <p style="margin: 20px 0 0 0;">Por favor, altere sua senha após o primeiro acesso.</p>
-                  </td>
-                </tr>
-                <tr>
-                  <td bgcolor="#ffffff" style="padding: 0 30px 40px 30px; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 14px; line-height: 20px; color: #666666;">
-                    <p style="margin: 0;">Atenciosamente,<br>Equipe TubeFlow</p>
-                  </td>
-                </tr>
-                <tr>
-                  <td bgcolor="#F3F4F6" style="padding: 20px 30px; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 12px; color: #999999;" align="center">
-                    <p style="margin: 0;">&copy; 2025 TubeFlow. Todos os direitos reservados.</p>
-                  </td>
-                </tr>
-              </table>
-            </body>
-          </html>
-        `
-      }
-  
-      await transporter.sendMail(mailOptions)
-      res.status(201).json({ message: 'Administrador cadastrado com sucesso. A senha foi enviada para o e-mail cadastrado.' })
-    } catch (error) {
-      if (connection) connection.release()
-      console.error('Erro ao cadastrar administrador:', error)
-      res.status(500).json({ message: 'Erro ao cadastrar administrador.' })
+function generateRandomPassword(length = 12) {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()';
+    return Array.from(crypto.randomFillSync(new Uint32Array(length)))
+        .map((x) => chars[x % chars.length])
+        .join('');
+}
+
+router.get('/administrators', async (req, res) => {
+    const companyId = req.headers['company-id'];
+    let client;
+
+    if (!companyId) {
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
     }
-  })
+
+    try {
+        client = await req.db.connect();
+        const result = await client.query(
+            `SELECT 
+                id, 
+                name, 
+                email, 
+                created_at AS "createdAt",
+                updated_at AS "updatedAt" 
+             FROM users 
+             WHERE role = 'admin' 
+             AND company_id = $1`,
+            [companyId]
+        );
+
+        res.json({ 
+            data: result.rows,
+            count: result.rowCount
+        });
+    } catch (error) {
+        console.error('Erro ao buscar administradores:', {
+            error: error.message,
+            companyId: companyId.slice(0, 8)
+        });
+        res.status(500).json({ 
+            message: 'Erro ao buscar administradores.',
+            errorCode: 'ADMIN_FETCH_ERROR'
+        });
+    } finally {
+        if (client) client.release();
+    }
+});
+
+router.post('/register-administrator', async (req, res) => {
+    const { name, email } = req.body;
+    const companyId = req.headers['company-id'];
+    let client;
+
+    if (!companyId) {
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
+    }
+
+    if (!name || !email) {
+        return res.status(400).json({ 
+            message: 'Nome e e-mail são obrigatórios.',
+            errorCode: 'MISSING_REQUIRED_FIELDS'
+        });
+    }
+
+    try {
+        client = await req.db.connect();
+        await client.query('BEGIN');
+
+        // Verificar e-mail existente na empresa
+        const emailCheck = await client.query(
+            `SELECT id FROM users 
+             WHERE email = $1 
+             AND company_id = $2`,
+            [email, companyId]
+        );
+
+        if (emailCheck.rows.length > 0) {
+            await client.query('ROLLBACK');
+            return res.status(409).json({ 
+                message: 'E-mail já cadastrado para esta empresa.',
+                errorCode: 'DUPLICATE_EMAIL'
+            });
+        }
+
+        // Gerar senha segura
+        const randomPassword = generateRandomPassword();
+        const hashedPassword = await bcrypt.hash(randomPassword, 12);
+
+        // Inserir novo administrador
+        const insertResult = await client.query(
+            `INSERT INTO users (
+                name, 
+                email, 
+                password, 
+                role, 
+                company_id, 
+                created_at, 
+                updated_at
+            ) VALUES ($1, $2, $3, 'admin', $4, NOW(), NOW())
+            RETURNING id, created_at`,
+            [name, email, hashedPassword, companyId]
+        );
+
+        // Enviar e-mail
+        const mailOptions = {
+            from: '"Equipe TubeFlow" <contato@conexaocode.com>',
+            to: email,
+            subject: 'Cadastro de Administrador - TubeFlow',
+            html: `
+                <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 8px;">
+                    <div style="text-align: center; margin-bottom: 30px;">
+                        <h1 style="color: #1D4ED8; font-size: 24px; margin-bottom: 10px;">Cadastro Realizado</h1>
+                        <p style="color: #4b5563;">Olá ${name}, seu acesso como administrador foi configurado com sucesso.</p>
+                    </div>
+
+                    <div style="background-color: #f8fafc; padding: 20px; border-radius: 6px; margin-bottom: 25px;">
+                        <h2 style="color: #1e3a8a; font-size: 18px; margin-bottom: 15px;">Credenciais de Acesso</h2>
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #4b5563; font-weight: 500;">E-mail:</span>
+                            <span style="color: #1e3a8a;">${email}</span>
+                        </div>
+                        <div style="margin-bottom: 15px;">
+                            <span style="color: #4b5563; font-weight: 500;">Senha Temporária:</span>
+                            <span style="color: #1e3a8a; font-family: monospace;">${randomPassword}</span>
+                        </div>
+                        <p style="color: #6b7280; font-size: 14px;">
+                            Recomendamos que altere sua senha após o primeiro login.
+                        </p>
+                    </div>
+
+                    <div style="text-align: center; color: #6b7280; font-size: 14px;">
+                        <p>Este é um e-mail automático, por favor não responda.</p>
+                        <p style="margin-top: 20px;">
+                            <a href="https://conexaocode.com" style="color: #3b82f6; text-decoration: none;">Suporte Técnico</a> | 
+                            <a href="https://conexaocode.com/privacidade" style="color: #3b82f6; text-decoration: none;">Política de Privacidade</a>
+                        </p>
+                    </div>
+                </div>
+            `
+        };
+
+        await transporter.sendMail(mailOptions);
+        await client.query('COMMIT');
+
+        res.status(201).json({ 
+            message: 'Administrador cadastrado com sucesso.',
+            data: {
+                id: insertResult.rows[0].id,
+                createdAt: insertResult.rows[0].created_at
+            }
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('Erro ao cadastrar administrador:', {
+            error: error.message,
+            params: { name, email: email.slice(0, 15) },
+            companyId: companyId.slice(0, 8)
+        });
+        res.status(500).json({ 
+            message: 'Erro ao cadastrar administrador.',
+            errorCode: 'ADMIN_CREATION_ERROR'
+        });
+    } finally {
+        if (client) client.release();
+    }
+});
 
 router.put('/administrators/:id', async (req, res) => {
-    const { id } = req.params
-    const { name, email } = req.body
-    let connection
-    try {
-        connection = await req.db.getConnection()
-        const [result] = await connection.query(
-            "UPDATE users SET name = ?, email = ? WHERE id = ? AND role = 'admin'",
-            [name, email, id]
-        )
-        connection.release()
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'Administrador não encontrado.' })
-        }
-        res.json({ message: 'Administrador atualizado com sucesso.' })
-    } catch (error) {
-        if (connection) connection.release()
-        res.status(500).json({ message: 'Erro ao atualizar administrador.' })
+    const { id } = req.params;
+    const { name, email } = req.body;
+    const companyId = req.headers['company-id'];
+    let client;
+
+    if (!companyId) {
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
     }
-})
+
+    try {
+        client = await req.db.connect();
+
+        const result = await client.query(
+            `UPDATE users 
+             SET 
+                name = $1, 
+                email = $2, 
+                updated_at = NOW() 
+             WHERE id = $3 
+             AND role = 'admin'
+             AND company_id = $4
+             RETURNING *`,
+            [name, email, id, companyId]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ 
+                message: 'Administrador não encontrado.',
+                errorCode: 'ADMIN_NOT_FOUND'
+            });
+        }
+
+        res.json({ 
+            message: 'Administrador atualizado com sucesso.',
+            data: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Erro ao atualizar administrador:', {
+            error: error.message,
+            adminId: id,
+            companyId: companyId.slice(0, 8)
+        });
+        res.status(500).json({ 
+            message: 'Erro ao atualizar administrador.',
+            errorCode: 'ADMIN_UPDATE_ERROR'
+        });
+    } finally {
+        if (client) client.release();
+    }
+});
 
 router.delete('/administrators/:id', async (req, res) => {
-    const { id } = req.params
-    let connection
-    try {
-        connection = await req.db.getConnection()
-        const [result] = await connection.query(
-            "DELETE FROM users WHERE id = ? AND role = 'admin'",
-            [id]
-        )
-        connection.release()
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'Administrador não encontrado.' })
-        }
-        res.json({ message: 'Administrador excluído com sucesso.' })
-    } catch (error) {
-        if (connection) connection.release()
-        res.status(500).json({ message: 'Erro ao excluir administrador.' })
+    const { id } = req.params;
+    const companyId = req.headers['company-id'];
+    let client;
+
+    if (!companyId) {
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
     }
-})
+
+    try {
+        client = await req.db.connect();
+
+        const result = await client.query(
+            `DELETE FROM users 
+             WHERE id = $1 
+             AND role = 'admin'
+             AND company_id = $2
+             RETURNING id`,
+            [id, companyId]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ 
+                message: 'Administrador não encontrado.',
+                errorCode: 'ADMIN_NOT_FOUND'
+            });
+        }
+
+        res.json({ 
+            message: 'Administrador excluído com sucesso.',
+            deletedId: result.rows[0].id
+        });
+    } catch (error) {
+        console.error('Erro ao excluir administrador:', {
+            error: error.message,
+            adminId: id,
+            companyId: companyId.slice(0, 8)
+        });
+        res.status(500).json({ 
+            message: 'Erro ao excluir administrador.',
+            errorCode: 'ADMIN_DELETION_ERROR'
+        });
+    } finally {
+        if (client) client.release();
+    }
+});
 
 module.exports = router;
