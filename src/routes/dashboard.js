@@ -180,8 +180,11 @@ router.get('/stats', async (req, res) => {
                 COALESCE(SUM(logs.tasksCompleted), 0) AS "tasksCompleted",
                 COALESCE(AVG(logs.totalDuration), 0) AS "averageTime",
                 SUM(
-                    (COALESCE(logs.totalDuration, 0) > 86400)::INT
-                ) AS delays  -- Correção aplicada aqui
+                    CASE
+                        WHEN COALESCE(logs.totalDuration, 0) > 86400 THEN 1
+                        ELSE 0
+                    END
+                ) AS delays
             FROM freelancers f
             LEFT JOIN (
                 SELECT 
