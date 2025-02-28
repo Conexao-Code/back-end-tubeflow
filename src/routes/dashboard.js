@@ -181,7 +181,7 @@ router.get('/stats', async (req, res) => {
                 COALESCE(AVG(logs.totalDuration), 0) AS "averageTime",
                 SUM(
                     (COALESCE(logs.totalDuration, 0) > 86400)::INT
-                ) AS delays
+                ) AS delays  -- Correção aplicada aqui
             FROM freelancers f
             LEFT JOIN (
                 SELECT 
@@ -202,35 +202,20 @@ router.get('/stats', async (req, res) => {
                 SELECT 
                     video_id,
                     user_id,
+                    SUM(duration_seconds) AS totalDuration,
                     SUM(
                         CASE 
-                            WHEN (new_status = 'Roteiro_Concluído' AND prev_status = 'Roteiro_Em_Andamento') OR
-                                 (new_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
-                                 (new_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
-                                 (new_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
-                            THEN EXTRACT(EPOCH FROM (created_at - prev_created_at))
-                            ELSE 0
-                        END
-                    )::INT AS totalDuration,
-                    SUM(
-                        CASE 
-                            WHEN new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
-                            THEN 1 
+                            WHEN new_status IN (
+                                'Roteiro_Concluído', 
+                                'Narração_Concluída', 
+                                'Edição_Concluído', 
+                                'Thumbnail_Concluída'
+                            ) THEN 1 
                             ELSE 0 
                         END
                     ) AS tasksCompleted
-                FROM (
-                    SELECT 
-                        video_id,
-                        user_id,
-                        new_status,
-                        created_at,
-                        LAG(new_status) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_status,
-                        LAG(created_at) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_created_at
-                    FROM video_logs
-                    WHERE is_user = FALSE
-                ) AS log_pairs
-                WHERE new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                FROM video_logs
+                WHERE is_user = FALSE
                 GROUP BY video_id, user_id
             ) logs ON v.id = logs.video_id AND f.id = logs.user_id
             WHERE f.company_id = $1
@@ -280,7 +265,7 @@ router.get('/stats', async (req, res) => {
             error: {
                 code: error.code || 'DB_ERROR',
                 detail: error.message,
-                hint: 'Verifique os filtros e formato das datas (YYYY-MM-DD)',
+                hint: 'Verifique os parâmetros de filtro e status',
                 timestamp: new Date().toISOString()
             }
         });
