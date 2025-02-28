@@ -163,6 +163,14 @@ router.get('/stats', async (req, res) => {
             companyId
         } = req.query;
 
+        // Validação obrigatória
+        if (!companyId) {
+            return res.status(400).json({
+                message: "Parâmetro obrigatório faltando",
+                details: "companyId é requerido"
+            });
+        }
+
         client = await req.db.connect();
 
         let queryParams = [companyId];
@@ -196,8 +204,9 @@ router.get('/stats', async (req, res) => {
                     SUM(duration) AS totalDuration,
                     SUM(
                         CASE 
-                            WHEN to_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
-                            THEN 1 ELSE 0
+                            WHEN new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                            THEN 1 
+                            ELSE 0 
                         END
                     ) AS tasksCompleted
                 FROM video_logs
@@ -207,35 +216,31 @@ router.get('/stats', async (req, res) => {
             WHERE f.company_id = $1
         `;
 
-        if (startDate) {
-            queryParams.push(startDate);
-            query += ` AND v.created_at >= $${queryParams.length}`;
-        }
+        // Adicionar condições
+        const addCondition = (value, column, operator = '>=') => {
+            if (value) {
+                queryParams.push(value);
+                query += ` AND ${column} ${operator} $${queryParams.length}`;
+            }
+        };
 
-        if (endDate) {
-            queryParams.push(endDate);
-            query += ` AND v.created_at <= $${queryParams.length}`;
-        }
-
-        if (channelId) {
-            queryParams.push(channelId);
-            query += ` AND v.channel_id = $${queryParams.length}`;
-        }
-
-        if (freelancerId) {
-            queryParams.push(freelancerId);
-            query += ` AND f.id = $${queryParams.length}`;
-        }
+        addCondition(startDate, 'v.created_at');
+        addCondition(endDate, 'v.created_at', '<=');
+        addCondition(channelId, 'v.channel_id');
+        addCondition(freelancerId, 'f.id');
 
         query += ' GROUP BY f.id';
+
         const statsResult = await client.query(query, queryParams);
 
+        // Formatação do tempo
         const formattedStats = statsResult.rows.map(stat => {
             const totalSeconds = Math.round(stat.averageTime);
             const days = Math.floor(totalSeconds / 86400);
             const hours = Math.floor((totalSeconds % 86400) / 3600);
             const minutes = Math.floor((totalSeconds % 3600) / 60);
             const seconds = totalSeconds % 60;
+            
             return {
                 ...stat,
                 averageTimeFormatted: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`
@@ -243,9 +248,24 @@ router.get('/stats', async (req, res) => {
         });
 
         res.json({ stats: formattedStats });
+
     } catch (error) {
-        console.error('Erro ao buscar estatísticas:', error);
-        res.status(500).json({ message: 'Erro ao buscar estatísticas.' });
+        console.error('Erro detalhado:', {
+            message: error.message,
+            query: error.query?.text,
+            parameters: error.query?.values,
+            stack: error.stack
+        });
+
+        res.status(500).json({
+            message: 'Erro ao buscar estatísticas',
+            error: {
+                code: error.code || 'DB_ERROR',
+                detail: error.message,
+                hint: 'Verifique os parâmetros de filtro e status',
+                timestamp: new Date().toISOString()
+            }
+        });
     } finally {
         if (client) client.release();
     }
