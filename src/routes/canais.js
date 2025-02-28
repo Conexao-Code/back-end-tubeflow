@@ -1,132 +1,273 @@
 const express = require('express');
+const { Pool } = require('pg');
+const config = require('../config');
 const router = express.Router();
 
-router.get('/channels', async (req, res) => {
-    try {
-        const connection = await req.db.getConnection();
+const pool = new Pool(config.dbConfig.postgres);
 
-        const [channels] = await connection.query(`
+router.use((req, res, next) => {
+  req.db = pool;
+  next();
+});
+
+router.get('/channels', async (req, res) => {
+    const companyId = req.headers['company-id'];
+    let client;
+
+    if (!companyId) {
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
+    }
+
+    try {
+        client = await req.db.connect();
+
+        const channelsQuery = `
             SELECT
                 c.id,
                 c.name,
                 c.description,
-                c.youtube_url AS youtubeUrl,
-                COUNT(v.id) AS totalVideos,
-                SUM(CASE WHEN MONTH(v.created_at) = MONTH(NOW()) THEN 1 ELSE 0 END) AS monthlyVideos
+                c.youtube_url AS "youtubeUrl",
+                COUNT(v.id) AS "totalVideos",
+                SUM(CASE WHEN EXTRACT(MONTH FROM v.created_at) = EXTRACT(MONTH FROM CURRENT_DATE) THEN 1 ELSE 0 END) AS "monthlyVideos"
             FROM channels c
             LEFT JOIN videos v ON v.channel_id = c.id
-            WHERE c.enabled = 1
+            WHERE c.company_id = $1 AND c.enabled = true
             GROUP BY c.id
-        `);
+        `;
 
-        const [totalVideosResult] = await connection.query(`
+        const totalVideosQuery = `
             SELECT
-                COUNT(*) AS totalMonthlyVideos
+                COUNT(*) AS "totalMonthlyVideos"
             FROM videos
-            WHERE MONTH(created_at) = MONTH(NOW())
-        `);
+            WHERE company_id = $1 
+            AND EXTRACT(MONTH FROM created_at) = EXTRACT(MONTH FROM CURRENT_DATE)
+        `;
 
-        connection.release();
+        const channelsResult = await client.query(channelsQuery, [companyId]);
+        const totalVideosResult = await client.query(totalVideosQuery, [companyId]);
 
         res.json({
-            channels,
-            totalMonthlyVideos: totalVideosResult[0].totalMonthlyVideos,
+            channels: channelsResult.rows,
+            totalMonthlyVideos: totalVideosResult.rows[0].totalMonthlyVideos,
         });
     } catch (error) {
-        console.error('Erro ao buscar canais com totais:', error);
-        res.status(500).json({ message: 'Erro ao buscar canais com totais.' });
+        console.error('Erro ao buscar canais:', {
+            error: error.message,
+            stack: error.stack,
+            companyId: companyId.slice(0, 8)
+        });
+        res.status(500).json({ 
+            message: 'Erro ao buscar canais.',
+            errorCode: 'CHANNEL_FETCH_ERROR'
+        });
+    } finally {
+        if (client) client.release();
     }
 });
 
 router.post('/channels', async (req, res) => {
     const { name, description, youtubeUrl } = req.body;
+    const companyId = req.headers['company-id'];
+    let client;
+
+    if (!companyId) {
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
+    }
 
     if (!name || !description || !youtubeUrl) {
-        return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
+        return res.status(400).json({ 
+            message: 'Todos os campos são obrigatórios.',
+            requiredFields: ['name', 'description', 'youtubeUrl'],
+            errorCode: 'MISSING_REQUIRED_FIELDS'
+        });
     }
 
     try {
-        const connection = await req.db.getConnection();
-        const [result] = await connection.query(
-            'INSERT INTO channels (name, description, youtube_url, created_at, updated_at) VALUES (?, ?, ?, NOW(), NOW())',
-            [name, description, youtubeUrl]
-        );
-        connection.release();
+        client = await req.db.connect();
 
-        res.json({ id: result.insertId, message: 'Canal criado com sucesso.' });
+        const insertQuery = `
+            INSERT INTO channels (
+                name, 
+                description, 
+                youtube_url, 
+                company_id, 
+                created_at, 
+                updated_at
+            ) VALUES ($1, $2, $3, $4, NOW(), NOW())
+            RETURNING id, created_at
+        `;
+
+        const result = await client.query(insertQuery, [
+            name, 
+            description, 
+            youtubeUrl, 
+            companyId
+        ]);
+
+        res.json({ 
+            id: result.rows[0].id,
+            message: 'Canal criado com sucesso.',
+            createdAt: result.rows[0].created_at
+        });
     } catch (error) {
-        console.error('Erro ao criar canal:', error);
-        res.status(500).json({ message: 'Erro ao criar canal.' });
+        console.error('Erro ao criar canal:', {
+            error: error.message,
+            params: { name, description, youtubeUrl: youtubeUrl.slice(0, 20) },
+            companyId: companyId.slice(0, 8)
+        });
+        res.status(500).json({ 
+            message: 'Erro ao criar canal.',
+            errorCode: 'CHANNEL_CREATION_ERROR'
+        });
+    } finally {
+        if (client) client.release();
     }
 });
 
 router.put('/channels/:id', async (req, res) => {
     const { id } = req.params;
     const { name, description, youtubeUrl } = req.body;
+    const companyId = req.headers['company-id'];
+    let client;
+
+    if (!companyId) {
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
+    }
 
     if (!name || !description || !youtubeUrl) {
-        return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
+        return res.status(400).json({ 
+            message: 'Todos os campos são obrigatórios.',
+            requiredFields: ['name', 'description', 'youtubeUrl'],
+            errorCode: 'MISSING_REQUIRED_FIELDS'
+        });
     }
 
     try {
-        const connection = await req.db.getConnection();
-        const [result] = await connection.query(
-            'UPDATE channels SET name = ?, description = ?, youtube_url = ?, updated_at = NOW() WHERE id = ?',
-            [name, description, youtubeUrl, id]
-        );
-        connection.release();
+        client = await req.db.connect();
 
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'Canal não encontrado.' });
+        const updateQuery = `
+            UPDATE channels 
+            SET 
+                name = $1, 
+                description = $2, 
+                youtube_url = $3, 
+                updated_at = NOW() 
+            WHERE id = $4 AND company_id = $5
+            RETURNING *
+        `;
+
+        const result = await client.query(updateQuery, [
+            name, 
+            description, 
+            youtubeUrl, 
+            id, 
+            companyId
+        ]);
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ 
+                message: 'Canal não encontrado ou não pertence à empresa.',
+                errorCode: 'CHANNEL_NOT_FOUND'
+            });
         }
 
-        res.json({ message: 'Canal atualizado com sucesso.' });
+        res.json({ 
+            message: 'Canal atualizado com sucesso.',
+            updatedAt: result.rows[0].updated_at
+        });
     } catch (error) {
-        console.error('Erro ao editar canal:', error);
-        res.status(500).json({ message: 'Erro ao editar canal.' });
+        console.error('Erro ao atualizar canal:', {
+            error: error.message,
+            channelId: id,
+            companyId: companyId.slice(0, 8)
+        });
+        res.status(500).json({ 
+            message: 'Erro ao atualizar canal.',
+            errorCode: 'CHANNEL_UPDATE_ERROR'
+        });
+    } finally {
+        if (client) client.release();
     }
 });
 
 router.delete('/channels/:id', async (req, res) => {
     const { id } = req.params;
+    const companyId = req.headers['company-id'];
+    let client;
+
+    if (!companyId) {
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
+    }
 
     try {
-        const connection = await req.db.getConnection();
+        client = await req.db.connect();
+        await client.query('BEGIN');
 
-        // Excluir os logs de vídeo vinculados aos vídeos que não estão publicados
-        await connection.query(`
-            DELETE vl
-            FROM video_logs vl
-            INNER JOIN videos v ON vl.video_id = v.id
-            WHERE v.channel_id = ? AND v.status != 'Publicado'
-        `, [id]);
+        // Excluir logs de vídeos não publicados
+        await client.query(`
+            DELETE FROM video_logs
+            WHERE video_id IN (
+                SELECT id FROM videos
+                WHERE channel_id = $1 
+                AND company_id = $2 
+                AND status != 'Publicado'
+            )
+        `, [id, companyId]);
 
-        // Excluir os vídeos que não estão publicados
-        await connection.query(`
+        // Excluir vídeos não publicados
+        await client.query(`
             DELETE FROM videos
-            WHERE channel_id = ? AND status != 'Publicado'
-        `, [id]);
+            WHERE channel_id = $1 
+            AND company_id = $2 
+            AND status != 'Publicado'
+        `, [id, companyId]);
 
-        // Em vez de excluir o canal, desabilita-o (para não aparecer no front-end)
-        const [result] = await connection.query(`
+        // Desabilitar canal
+        const updateResult = await client.query(`
             UPDATE channels
-            SET enabled = 0
-            WHERE id = ?
-        `, [id]);
+            SET enabled = false
+            WHERE id = $1 AND company_id = $2
+        `, [id, companyId]);
 
-        connection.release();
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({ message: 'Canal não encontrado.' });
+        if (updateResult.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ 
+                message: 'Canal não encontrado ou não pertence à empresa.',
+                errorCode: 'CHANNEL_NOT_FOUND'
+            });
         }
 
-        res.json({ message: 'Canal desabilitado com sucesso.' });
+        await client.query('COMMIT');
+        res.json({ 
+            message: 'Canal desabilitado com sucesso.',
+            disabledAt: new Date().toISOString()
+        });
     } catch (error) {
-        console.error('Erro ao excluir canal:', error);
-        res.status(500).json({ message: 'Erro ao excluir canal.' });
+        await client.query('ROLLBACK');
+        console.error('Erro ao desabilitar canal:', {
+            error: error.message,
+            channelId: id,
+            companyId: companyId.slice(0, 8)
+        });
+        res.status(500).json({ 
+            message: 'Erro ao desabilitar canal.',
+            errorCode: 'CHANNEL_DELETION_ERROR'
+        });
+    } finally {
+        if (client) client.release();
     }
 });
-
-
 
 module.exports = router;
