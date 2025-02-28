@@ -180,7 +180,9 @@ router.get('/stats', async (req, res) => {
                 f.name,
                 COALESCE(SUM(logs.tasksCompleted), 0) AS "tasksCompleted",
                 COALESCE(AVG(logs.totalDuration), 0) AS "averageTime",
-                SUM(COALESCE(logs.totalDuration, 0) > 86400)::INT AS delays
+                SUM(
+                    (COALESCE(logs.totalDuration, 0) > 86400)::INT  -- Correção aqui
+                AS delays
             FROM freelancers f
             LEFT JOIN (
                 SELECT 
@@ -201,11 +203,15 @@ router.get('/stats', async (req, res) => {
                 SELECT 
                     video_id,
                     user_id,
-                    SUM(duration) AS totalDuration,
+                    SUM(duration_seconds) AS totalDuration,  -- Verifique se esta coluna existe
                     SUM(
                         CASE 
-                            WHEN new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
-                            THEN 1 
+                            WHEN new_status IN (
+                                'Roteiro_Concluído', 
+                                'Narração_Concluída', 
+                                'Edição_Concluído', 
+                                'Thumbnail_Concluída'
+                            ) THEN 1 
                             ELSE 0 
                         END
                     ) AS tasksCompleted
