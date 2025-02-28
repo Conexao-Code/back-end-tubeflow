@@ -69,7 +69,22 @@ router.get('/logs2', async (req, res) => {
             freelancerId,
             companyId
         } = req.query;
-        
+
+        // Validação básica dos parâmetros
+        if (!companyId) {
+            return res.status(400).json({ 
+                message: 'Parâmetro obrigatório ausente',
+                details: 'companyId é requerido'
+            });
+        }
+
+        if (isNaN(page) || isNaN(limit)) {
+            return res.status(400).json({
+                message: 'Parâmetro inválido',
+                details: 'page e limit devem ser números válidos'
+            });
+        }
+
         const offset = (page - 1) * limit;
         client = await req.db.connect();
 
@@ -91,69 +106,75 @@ router.get('/logs2', async (req, res) => {
             WHERE v.company_id = $1
         `;
 
-        if (startDate) {
-            queryParams.push(startDate);
-            query += ` AND l.timestamp >= $${queryParams.length}`;
-        }
+        // Construção dinâmica da query
+        const addCondition = (value, condition, paramName) => {
+            if (value) {
+                queryParams.push(value);
+                query += ` AND ${condition} = $${queryParams.length}`;
+            }
+        };
 
-        if (endDate) {
-            queryParams.push(endDate);
-            query += ` AND l.timestamp <= $${queryParams.length}`;
-        }
+        addCondition(startDate, 'l.timestamp', startDate);
+        addCondition(endDate, 'l.timestamp', endDate);
+        addCondition(channelId, 'v.channel_id', channelId);
+        addCondition(freelancerId, 'l.user_id', freelancerId);
 
-        if (channelId) {
-            queryParams.push(channelId);
-            query += ` AND v.channel_id = $${queryParams.length}`;
-        }
-
-        if (freelancerId) {
-            queryParams.push(freelancerId);
-            query += ` AND l.user_id = $${queryParams.length}`;
-        }
-
-        query += ` ORDER BY l.timestamp DESC LIMIT $${queryParams.length + 1} OFFSET $${queryParams.length + 2}`;
+        query += ` 
+            ORDER BY l.timestamp DESC 
+            LIMIT $${queryParams.length + 1} 
+            OFFSET $${queryParams.length + 2}
+        `;
         queryParams.push(Number(limit), Number(offset));
 
+        // Execução da query principal
         const logsResult = await client.query(query, queryParams);
 
+        // Query de contagem
         let countQuery = `
             SELECT COUNT(*) AS total 
             FROM video_logs l
             LEFT JOIN videos v ON l.video_id = v.id
             WHERE v.company_id = $1
         `;
+        
         const countParams = [companyId];
+        const addCountCondition = (value, condition) => {
+            if (value) {
+                countParams.push(value);
+                countQuery += ` AND ${condition} = $${countParams.length}`;
+            }
+        };
 
-        if (startDate) {
-            countParams.push(startDate);
-            countQuery += ` AND l.timestamp >= $${countParams.length}`;
-        }
-
-        if (endDate) {
-            countParams.push(endDate);
-            countQuery += ` AND l.timestamp <= $${countParams.length}`;
-        }
-
-        if (channelId) {
-            countParams.push(channelId);
-            countQuery += ` AND v.channel_id = $${countParams.length}`;
-        }
-
-        if (freelancerId) {
-            countParams.push(freelancerId);
-            countQuery += ` AND l.user_id = $${countParams.length}`;
-        }
+        addCountCondition(startDate, 'l.timestamp');
+        addCountCondition(endDate, 'l.timestamp');
+        addCountCondition(channelId, 'v.channel_id');
+        addCountCondition(freelancerId, 'l.user_id');
 
         const countResult = await client.query(countQuery, countParams);
-        const total = countResult.rows[0].total;
+        const total = countResult.rows[0]?.total || 0;
 
         res.json({ 
             logs: logsResult.rows,
             total: parseInt(total, 10)
         });
+
     } catch (error) {
-        console.error('Erro ao buscar logs:', error);
-        res.status(500).json({ message: 'Erro ao buscar logs.' });
+        console.error('Erro detalhado:', {
+            message: error.message,
+            stack: error.stack,
+            query: error.query,
+            parameters: error.parameters
+        });
+
+        res.status(500).json({ 
+            message: 'Erro ao buscar logs',
+            error: {
+                code: error.code || 'UNKNOWN_ERROR',
+                detail: error.detail || error.message,
+                hint: error.hint || 'Verifique os parâmetros enviados',
+                timestamp: new Date().toISOString()
+            }
+        });
     } finally {
         if (client) client.release();
     }
