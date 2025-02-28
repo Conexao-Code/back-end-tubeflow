@@ -57,7 +57,7 @@ router.get('/freelancers3', async (req, res) => {
     }
 });
 
-router.get('/logs', async (req, res) => {
+router.get('/logs2', async (req, res) => {
     let client;
     try {
         const { 
