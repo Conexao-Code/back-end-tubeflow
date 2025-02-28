@@ -163,7 +163,6 @@ router.get('/stats', async (req, res) => {
             companyId
         } = req.query;
 
-        // Validação obrigatória
         if (!companyId) {
             return res.status(400).json({
                 message: "Parâmetro obrigatório faltando",
@@ -181,8 +180,8 @@ router.get('/stats', async (req, res) => {
                 COALESCE(SUM(logs.tasksCompleted), 0) AS "tasksCompleted",
                 COALESCE(AVG(logs.totalDuration), 0) AS "averageTime",
                 SUM(
-                    (COALESCE(logs.totalDuration, 0) > 86400)::INT  -- Correção aqui
-                AS delays
+                    (COALESCE(logs.totalDuration, 0) > 86400)::INT
+                ) AS delays
             FROM freelancers f
             LEFT JOIN (
                 SELECT 
@@ -203,26 +202,40 @@ router.get('/stats', async (req, res) => {
                 SELECT 
                     video_id,
                     user_id,
-                    SUM(duration_seconds) AS totalDuration,  -- Verifique se esta coluna existe
                     SUM(
                         CASE 
-                            WHEN new_status IN (
-                                'Roteiro_Concluído', 
-                                'Narração_Concluída', 
-                                'Edição_Concluído', 
-                                'Thumbnail_Concluída'
-                            ) THEN 1 
+                            WHEN (new_status = 'Roteiro_Concluído' AND prev_status = 'Roteiro_Em_Andamento') OR
+                                 (new_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
+                                 (new_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
+                                 (new_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
+                            THEN EXTRACT(EPOCH FROM (created_at - prev_created_at))
+                            ELSE 0
+                        END
+                    )::INT AS totalDuration,
+                    SUM(
+                        CASE 
+                            WHEN new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                            THEN 1 
                             ELSE 0 
                         END
                     ) AS tasksCompleted
-                FROM video_logs
-                WHERE is_user = FALSE
+                FROM (
+                    SELECT 
+                        video_id,
+                        user_id,
+                        new_status,
+                        created_at,
+                        LAG(new_status) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_status,
+                        LAG(created_at) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_created_at
+                    FROM video_logs
+                    WHERE is_user = FALSE
+                ) AS log_pairs
+                WHERE new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
                 GROUP BY video_id, user_id
             ) logs ON v.id = logs.video_id AND f.id = logs.user_id
             WHERE f.company_id = $1
         `;
 
-        // Adicionar condições
         const addCondition = (value, column, operator = '>=') => {
             if (value) {
                 queryParams.push(value);
@@ -239,7 +252,6 @@ router.get('/stats', async (req, res) => {
 
         const statsResult = await client.query(query, queryParams);
 
-        // Formatação do tempo
         const formattedStats = statsResult.rows.map(stat => {
             const totalSeconds = Math.round(stat.averageTime);
             const days = Math.floor(totalSeconds / 86400);
@@ -268,7 +280,7 @@ router.get('/stats', async (req, res) => {
             error: {
                 code: error.code || 'DB_ERROR',
                 detail: error.message,
-                hint: 'Verifique os parâmetros de filtro e status',
+                hint: 'Verifique os filtros e formato das datas (YYYY-MM-DD)',
                 timestamp: new Date().toISOString()
             }
         });
