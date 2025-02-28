@@ -10,8 +10,8 @@ const ExcelJS = require('exceljs');
 const pool = new Pool(config.dbConfig.postgres);
 
 router.use((req, res, next) => {
-  req.db = pool;
-  next();
+    req.db = pool;
+    next();
 });
 
 router.get('/channels', async (req, res) => {
@@ -53,16 +53,16 @@ router.get('/freelancers', async (req, res) => {
 router.get('/logs', async (req, res) => {
     let client;
     try {
-        const { 
-            page = 1, 
-            limit = 10, 
-            startDate, 
-            endDate, 
-            channelId, 
+        const {
+            page = 1,
+            limit = 10,
+            startDate,
+            endDate,
+            channelId,
             freelancerId,
             companyId
         } = req.query;
-        
+
         const offset = (page - 1) * limit;
         client = await req.db.connect();
 
@@ -140,7 +140,7 @@ router.get('/logs', async (req, res) => {
         const countResult = await client.query(countQuery, countParams);
         const total = countResult.rows[0].total;
 
-        res.json({ 
+        res.json({
             logs: logsResult.rows,
             total: parseInt(total, 10)
         });
@@ -155,10 +155,10 @@ router.get('/logs', async (req, res) => {
 router.get('/stats', async (req, res) => {
     let client;
     try {
-        const { 
-            startDate, 
-            endDate, 
-            channelId, 
+        const {
+            startDate,
+            endDate,
+            channelId,
             freelancerId,
             companyId
         } = req.query;
@@ -193,7 +193,7 @@ router.get('/stats', async (req, res) => {
                 SELECT 
                     video_id,
                     user_id,
-                    SUM(duration) AS totalDuration,
+                    SUM(EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))) AS totalDuration,
                     SUM(
                         CASE 
                             WHEN new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
@@ -254,12 +254,12 @@ router.get('/stats', async (req, res) => {
 router.get('/export', async (req, res) => {
     let client;
     try {
-        const { 
-            startDate, 
-            endDate, 
-            channelId, 
-            freelancerId, 
-            type, 
+        const {
+            startDate,
+            endDate,
+            channelId,
+            freelancerId,
+            type,
             format = 'csv',
             companyId
         } = req.query;
