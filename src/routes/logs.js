@@ -32,15 +32,22 @@ router.get('/channels', async (req, res) => {
     }
 });
 
-router.get('/freelancers', async (req, res) => {
+router.get('/freelancers3', async (req, res) => {
     let client;
     try {
         const { companyId } = req.query;
+        
+        // Validação do companyId
+        if (!companyId) {
+            return res.status(400).json({ message: "Company ID é obrigatório." });
+        }
+
         client = await req.db.connect();
         const result = await client.query(
             'SELECT id, name FROM freelancers WHERE company_id = $1',
             [companyId]
         );
+        
         res.json({ data: result.rows });
     } catch (error) {
         console.error('Erro ao buscar freelancers:', error);
