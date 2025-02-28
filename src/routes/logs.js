@@ -173,7 +173,7 @@ router.get('/logs2', async (req, res) => {
     }
 });
 
-router.get('/stats', async (req, res) => {
+router.get('/stats2', async (req, res) => {
     let client;
     try {
         const { 
@@ -183,6 +183,14 @@ router.get('/stats', async (req, res) => {
             freelancerId,
             companyId
         } = req.query;
+
+        // Validação inicial
+        if (!companyId) {
+            return res.status(400).json({
+                message: "Parâmetro obrigatório faltando",
+                details: "O companyId é requerido na query string"
+            });
+        }
 
         client = await req.db.connect();
 
@@ -226,7 +234,7 @@ router.get('/stats', async (req, res) => {
                                      (new_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
                                      (new_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
                                      (new_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
-                                THEN EXTRACT(EPOCH FROM (timestamp - prev_timestamp))
+                                THEN EXTRACT(EPOCH FROM (created_at - prev_created_at))
                                 ELSE 0
                             END
                         ) AS duration_seconds,
@@ -241,9 +249,9 @@ router.get('/stats', async (req, res) => {
                             video_id,
                             user_id,
                             new_status,
-                            timestamp,
-                            LAG(new_status) OVER (PARTITION BY video_id, user_id ORDER BY timestamp) AS prev_status,
-                            LAG(timestamp) OVER (PARTITION BY video_id, user_id ORDER BY timestamp) AS prev_timestamp
+                            created_at,
+                            LAG(new_status) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_status,
+                            LAG(created_at) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_created_at
                         FROM video_logs
                         WHERE is_user = FALSE
                     ) AS log_pairs
@@ -255,27 +263,21 @@ router.get('/stats', async (req, res) => {
             WHERE f.company_id = $1
         `;
 
-        if (startDate) {
-            queryParams.push(startDate);
-            query += ` AND v.created_at >= $${queryParams.length}`;
-        }
+        // Adicionar condições dinamicamente
+        const addCondition = (value, column, operator = '>=') => {
+            if (value) {
+                queryParams.push(value);
+                query += ` AND ${column} ${operator} $${queryParams.length}`;
+            }
+        };
 
-        if (endDate) {
-            queryParams.push(endDate);
-            query += ` AND v.created_at <= $${queryParams.length}`;
-        }
-
-        if (channelId) {
-            queryParams.push(channelId);
-            query += ` AND v.channel_id = $${queryParams.length}`;
-        }
-
-        if (freelancerId) {
-            queryParams.push(freelancerId);
-            query += ` AND f.id = $${queryParams.length}`;
-        }
+        addCondition(startDate, 'v.created_at');
+        addCondition(endDate, 'v.created_at', '<=');
+        addCondition(channelId, 'v.channel_id');
+        addCondition(freelancerId, 'f.id');
 
         query += ' GROUP BY f.id';
+
         const statsResult = await client.query(query, queryParams);
 
         const formattedStats = statsResult.rows.map(stat => {
@@ -291,9 +293,28 @@ router.get('/stats', async (req, res) => {
         });
 
         res.json({ stats: formattedStats });
+
     } catch (error) {
-        console.error('Erro ao buscar estatísticas:', error);
-        res.status(500).json({ message: 'Erro ao buscar estatísticas.' });
+        console.error('Erro detalhado:', {
+            message: error.message,
+            stack: error.stack,
+            query: error.query,
+            parameters: error.parameters
+        });
+
+        res.status(500).json({
+            message: 'Erro ao buscar estatísticas',
+            error: {
+                code: error.code || 'POSTGRES_ERROR',
+                detail: error.detail || error.message,
+                hint: error.hint || 'Verifique os parâmetros de filtro e datas',
+                timestamp: new Date().toISOString(),
+                failedQuery: error.query ? {
+                    text: error.query.text,
+                    values: error.query.values
+                } : null
+            }
+        });
     } finally {
         if (client) client.release();
     }
