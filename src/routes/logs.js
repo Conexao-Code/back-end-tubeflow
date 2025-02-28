@@ -70,24 +70,16 @@ router.get('/logs2', async (req, res) => {
             companyId
         } = req.query;
 
-        // Validação básica dos parâmetros
+        // Validação inicial
         if (!companyId) {
             return res.status(400).json({ 
-                message: 'Parâmetro obrigatório ausente',
-                details: 'companyId é requerido'
+                message: "Company ID é obrigatório",
+                details: "Parâmetro 'companyId' não fornecido na query string"
             });
         }
 
-        if (isNaN(page) || isNaN(limit)) {
-            return res.status(400).json({
-                message: 'Parâmetro inválido',
-                details: 'page e limit devem ser números válidos'
-            });
-        }
-
-        const offset = (page - 1) * limit;
         client = await req.db.connect();
-
+        
         let queryParams = [companyId];
         let query = `
             SELECT 
@@ -98,7 +90,7 @@ router.get('/logs2', async (req, res) => {
                 f.name AS "freelancerName", 
                 l.old_status AS "previousStatus", 
                 l.new_status AS "newStatus", 
-                l.timestamp 
+                l.created_at AS timestamp
             FROM video_logs l
             LEFT JOIN videos v ON l.video_id = v.id
             LEFT JOIN channels c ON v.channel_id = c.id
@@ -106,47 +98,49 @@ router.get('/logs2', async (req, res) => {
             WHERE v.company_id = $1
         `;
 
-        // Construção dinâmica da query
-        const addCondition = (value, condition, paramName) => {
+        // Função auxiliar para adicionar condições
+        const addCondition = (value, column, operator = '>=') => {
             if (value) {
                 queryParams.push(value);
-                query += ` AND ${condition} = $${queryParams.length}`;
+                query += ` AND ${column} ${operator} $${queryParams.length}`;
             }
         };
 
-        addCondition(startDate, 'l.timestamp', startDate);
-        addCondition(endDate, 'l.timestamp', endDate);
-        addCondition(channelId, 'v.channel_id', channelId);
-        addCondition(freelancerId, 'l.user_id', freelancerId);
+        addCondition(startDate, 'l.created_at');
+        addCondition(endDate, 'l.created_at', '<=');
+        addCondition(channelId, 'v.channel_id');
+        addCondition(freelancerId, 'l.user_id');
 
-        query += ` 
-            ORDER BY l.timestamp DESC 
+        // Paginação
+        const offset = (page - 1) * limit;
+        query += `
+            ORDER BY l.created_at DESC 
             LIMIT $${queryParams.length + 1} 
             OFFSET $${queryParams.length + 2}
         `;
         queryParams.push(Number(limit), Number(offset));
 
-        // Execução da query principal
+        // Execução da query
         const logsResult = await client.query(query, queryParams);
 
-        // Query de contagem
+        // Query de contagem (também corrigida)
         let countQuery = `
             SELECT COUNT(*) AS total 
             FROM video_logs l
             LEFT JOIN videos v ON l.video_id = v.id
             WHERE v.company_id = $1
         `;
-        
         const countParams = [companyId];
-        const addCountCondition = (value, condition) => {
+
+        const addCountCondition = (value, column, operator = '>=') => {
             if (value) {
                 countParams.push(value);
-                countQuery += ` AND ${condition} = $${countParams.length}`;
+                countQuery += ` AND ${column} ${operator} $${countParams.length}`;
             }
         };
 
-        addCountCondition(startDate, 'l.timestamp');
-        addCountCondition(endDate, 'l.timestamp');
+        addCountCondition(startDate, 'l.created_at');
+        addCountCondition(endDate, 'l.created_at', '<=');
         addCountCondition(channelId, 'v.channel_id');
         addCountCondition(freelancerId, 'l.user_id');
 
@@ -161,17 +155,16 @@ router.get('/logs2', async (req, res) => {
     } catch (error) {
         console.error('Erro detalhado:', {
             message: error.message,
-            stack: error.stack,
-            query: error.query,
-            parameters: error.parameters
+            query: error.query || query,
+            parameters: error.parameters || queryParams
         });
 
         res.status(500).json({ 
             message: 'Erro ao buscar logs',
             error: {
-                code: error.code || 'UNKNOWN_ERROR',
-                detail: error.detail || error.message,
-                hint: error.hint || 'Verifique os parâmetros enviados',
+                code: error.code || 'DB_ERROR',
+                detail: error.message,
+                hint: 'Verifique os parâmetros de filtragem e datas',
                 timestamp: new Date().toISOString()
             }
         });
