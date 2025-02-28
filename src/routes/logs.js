@@ -173,7 +173,7 @@ router.get('/logs2', async (req, res) => {
     }
 });
 
-router.get('/stats2', async (req, res) => {
+router.get('/stats', async (req, res) => {
     let client;
     try {
         const { 
@@ -201,7 +201,7 @@ router.get('/stats2', async (req, res) => {
                 f.name,
                 COALESCE(SUM(logs.tasksCompleted), 0) AS "tasksCompleted",
                 COALESCE(AVG(logs.totalDuration), 0) AS "averageTime",
-                SUM(COALESCE(logs.totalDuration, 0) > 86400)::INT AS delays
+                SUM( (COALESCE(logs.totalDuration, 0) > 86400)::INT ) AS delays
             FROM freelancers f
             LEFT JOIN (
                 SELECT 
