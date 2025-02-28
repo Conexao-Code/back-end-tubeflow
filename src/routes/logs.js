@@ -193,16 +193,43 @@ router.get('/stats', async (req, res) => {
                 SELECT 
                     video_id,
                     user_id,
-                    SUM(duration) AS totalDuration,
-                    SUM(
-                        CASE 
-                            WHEN new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
-                            THEN 1 ELSE 0
-                        END
-                    ) AS tasksCompleted
-                FROM video_logs
-                WHERE is_user = FALSE
-                GROUP BY video_id, user_id
+                    SUM(duration_seconds) AS totalDuration,
+                    tasksCompleted
+                FROM (
+                    SELECT 
+                        video_id,
+                        user_id,
+                        SUM(
+                            CASE 
+                                WHEN (new_status = 'Roteiro_Concluído' AND prev_status = 'Roteiro_Em_Andamento') OR
+                                     (new_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
+                                     (new_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
+                                     (new_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
+                                THEN EXTRACT(EPOCH FROM (timestamp - prev_timestamp))
+                                ELSE 0
+                            END
+                        ) AS duration_seconds,
+                        SUM(
+                            CASE 
+                                WHEN new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                                THEN 1 ELSE 0
+                            END
+                        ) AS tasksCompleted
+                    FROM (
+                        SELECT 
+                            video_id,
+                            user_id,
+                            new_status,
+                            timestamp,
+                            LAG(new_status) OVER (PARTITION BY video_id, user_id ORDER BY timestamp) AS prev_status,
+                            LAG(timestamp) OVER (PARTITION BY video_id, user_id ORDER BY timestamp) AS prev_timestamp
+                        FROM video_logs
+                        WHERE is_user = FALSE
+                    ) AS log_pairs
+                    WHERE new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                    GROUP BY video_id, user_id
+                ) AS calculated_logs
+                GROUP BY video_id, user_id, tasksCompleted
             ) logs ON v.id = logs.video_id AND f.id = logs.user_id
             WHERE f.company_id = $1
         `;
@@ -294,14 +321,43 @@ router.get('/export', async (req, res) => {
                 SELECT 
                     f.name AS "Nome do Freelancer", 
                     COUNT(v.id) AS "Tarefas Completadas", 
-                    ROUND(COALESCE(AVG(logs.totalDuration), 0), 2) AS "Tempo Médio (s)", 
+                    ROUND(COALESCE(AVG(logs.totalDuration), 0) AS "Tempo Médio (s)", 
                     SUM(COALESCE(logs.totalDuration, 0) > 86400)::INT AS "Atrasos"
                 FROM freelancers f
                 LEFT JOIN videos v ON v.company_id = f.company_id
                 LEFT JOIN (
-                    SELECT video_id, SUM(duration) AS totalDuration
-                    FROM video_logs
-                    GROUP BY video_id
+                    SELECT 
+                        video_id,
+                        user_id,
+                        SUM(duration_seconds) AS totalDuration
+                    FROM (
+                        SELECT 
+                            video_id,
+                            user_id,
+                            SUM(
+                                CASE 
+                                    WHEN (new_status = 'Roteiro_Concluído' AND prev_status = 'Roteiro_Em_Andamento') OR
+                                         (new_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
+                                         (new_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
+                                         (new_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
+                                    THEN EXTRACT(EPOCH FROM (timestamp - prev_timestamp))
+                                    ELSE 0
+                                END
+                            ) AS duration_seconds
+                        FROM (
+                            SELECT 
+                                video_id,
+                                user_id,
+                                new_status,
+                                timestamp,
+                                LAG(new_status) OVER (PARTITION BY video_id, user_id ORDER BY timestamp) AS prev_status,
+                                LAG(timestamp) OVER (PARTITION BY video_id, user_id ORDER BY timestamp) AS prev_timestamp
+                            FROM video_logs
+                        ) AS log_pairs
+                        WHERE new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                        GROUP BY video_id, user_id
+                    ) AS calculated_durations
+                    GROUP BY video_id, user_id
                 ) logs ON v.id = logs.video_id
                 WHERE f.company_id = $1
                 GROUP BY f.id
