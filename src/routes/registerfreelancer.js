@@ -31,63 +31,153 @@ router.post('/register-freelancer', async (req, res) => {
     const companyId = req.headers['company-id'];
     let client;
 
+    // Validação do Company ID
     if (!companyId) {
-        return res.status(400).json({ message: 'Company ID é obrigatório.' });
+        return res.status(400).json({ 
+            message: 'Company ID é obrigatório.',
+            errorCode: 'MISSING_COMPANY_ID'
+        });
     }
 
+    // Validação de campos obrigatórios
     if (!name || !email || !role || !phone) {
-        return res.status(400).json({ message: 'Nome, e-mail, função e telefone são obrigatórios.' });
+        return res.status(400).json({ 
+            message: 'Nome, e-mail, função e telefone são obrigatórios.',
+            requiredFields: ['name', 'email', 'role', 'phone'],
+            errorCode: 'MISSING_REQUIRED_FIELDS'
+        });
+    }
+
+    // Normalização e validação da função
+    const normalizedRole = role.toString().toLowerCase().trim();
+    const allowedRoles = ['roteirista', 'editor', 'narrador', 'thumb maker'];
+    
+    if (!allowedRoles.includes(normalizedRole)) {
+        return res.status(400).json({
+            message: 'Função inválida.',
+            allowedRoles: allowedRoles.map(r => r.charAt(0).toUpperCase() + r.slice(1)),
+            receivedRole: role,
+            errorCode: 'INVALID_ROLE'
+        });
     }
 
     try {
         client = await req.db.connect();
-        
-        const checkResult = await client.query(
-            'SELECT * FROM freelancers WHERE email = $1 AND company_id = $2', 
+
+        // Verificação de e-mail único por empresa
+        const emailCheck = await client.query(
+            'SELECT id FROM freelancers WHERE email = $1 AND company_id = $2',
             [email, companyId]
         );
 
-        if (checkResult.rows.length > 0) {
-            return res.status(409).json({ message: 'E-mail já cadastrado.' });
+        if (emailCheck.rows.length > 0) {
+            return res.status(409).json({ 
+                message: 'E-mail já cadastrado para esta empresa.',
+                errorCode: 'DUPLICATE_EMAIL'
+            });
         }
 
-        const generatedPassword = crypto.randomBytes(8).toString('hex');
-        const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+        // Geração de senha segura
+        const generatedPassword = crypto.randomBytes(10).toString('hex');
+        const hashedPassword = await bcrypt.hash(generatedPassword, 12);
 
-        await client.query(
-            `INSERT INTO freelancers 
-                (name, email, role, phone, password, company_id, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
-            [name, email, role, phone, hashedPassword, companyId]
+        // Inserção no banco de dados
+        const insertResult = await client.query(
+            `INSERT INTO freelancers (
+                name, 
+                email, 
+                role, 
+                phone, 
+                password, 
+                company_id, 
+                created_at, 
+                updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+            RETURNING id, created_at`,
+            [name, email, normalizedRole, phone, hashedPassword, companyId]
         );
 
+        // Envio de e-mail com template profissional
         await transporter.sendMail({
-            from: 'contato@conexaocode.com',
+            from: '"Suporte TubeFlow" <contato@conexaocode.com>',
             to: email,
-            subject: 'Bem-vindo ao sistema',
+            subject: 'Cadastro Realizado - TubeFlow',
             html: `
-                <div style="font-family: Poppins, sans-serif; padding: 20px; background-color: #f9f9f9; border: 1px solid #ddd; border-radius: 8px;">
-                    <h2 style="color: #333;">Olá, ${name}</h2>
-                    <p style="color: #555;">Sua conta foi criada com sucesso! Aqui estão seus detalhes de login:</p>
-                    <p style="color: #555;"><strong>E-mail:</strong> ${email}</p>
-                    <p style="color: #555;"><strong>Senha:</strong> ${generatedPassword}</p>
-                    <p style="color: #555;">Recomendamos que você altere sua senha após o primeiro login.</p>
-                    <hr style="border: none; border-top: 1px solid #ddd; margin: 20px 0;">
-                    <p style="color: #777; font-size: 12px;">Atenciosamente,</p>
-                    <p style="color: #777; font-size: 12px;">Equipe do Sistema</p>
+                <div style="font-family: 'Poppins', sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff; border: 1px solid #e0e0e0; border-radius: 8px;">
+                    <div style="text-align: center; margin-bottom: 30px;">
+                        <img src="https://apitubeflow.conexaocode.com/logo.png" alt="Logo TubeFlow" style="height: 50px; margin-bottom: 20px;">
+                        <h1 style="color: #2d3748; font-size: 24px; margin-bottom: 10px;">Bem-vindo(a) à Plataforma TubeFlow</h1>
+                        <p style="color: #4a5568; font-size: 16px;">Seu cadastro foi realizado com sucesso!</p>
+                    </div>
+
+                    <div style="background-color: #f7fafc; padding: 20px; border-radius: 6px; margin-bottom: 25px;">
+                        <h2 style="color: #2d3748; font-size: 18px; margin-bottom: 15px;">Detalhes de Acesso</h2>
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #4a5568; font-weight: 500;">E-mail:</span>
+                            <span style="color: #2d3748;">${email}</span>
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <span style="color: #4a5568; font-weight: 500;">Senha Temporária:</span>
+                            <span style="color: #2d3748; font-family: monospace;">${generatedPassword}</span>
+                        </div>
+                        <div style="color: #718096; font-size: 14px;">
+                            <p>Recomendamos que:</p>
+                            <ul style="margin-top: 5px; padding-left: 20px;">
+                                <li>Altere sua senha no primeiro acesso</li>
+                                <li>Mantenha suas credenciais em local seguro</li>
+                                <li>Utilize autenticação de dois fatores</li>
+                            </ul>
+                        </div>
+                    </div>
+
+                    <div style="text-align: center; color: #718096; font-size: 14px;">
+                        <p>Este é um e-mail automático, por favor não responda.</p>
+                        <p style="margin-top: 10px;">Equipe TubeFlow</p>
+                        <p style="margin-top: 5px;">
+                            <a href="https://conexaocode.com" style="color: #4299e1; text-decoration: none;">Suporte Técnico</a> | 
+                            <a href="https://conexaocode.com/privacidade" style="color: #4299e1; text-decoration: none;">Política de Privacidade</a>
+                        </p>
+                    </div>
                 </div>
             `
         });
 
-        res.status(201).json({ message: 'Freelancer cadastrado com sucesso. A senha foi enviada por e-mail.' });
-    } catch (error) {
-        console.error('Erro ao registrar freelancer:', error);
-        res.status(500).json({ 
-            message: 'Erro ao processar o cadastro.',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        // Resposta de sucesso
+        res.status(201).json({
+            message: 'Freelancer cadastrado com sucesso.',
+            data: {
+                id: insertResult.rows[0].id,
+                createdAt: insertResult.rows[0].created_at
+            },
+            emailStatus: 'Credentials sent to ' + email
         });
+
+    } catch (error) {
+        console.error('Erro completo no registro:', {
+            error: error.message,
+            stack: error.stack,
+            params: { name, email, role, phone: phone?.slice(0, 6) + '****' },
+            companyId: companyId?.slice(0, 8)
+        });
+
+        res.status(500).json({ 
+            message: 'Erro no processo de cadastro.',
+            error: process.env.NODE_ENV === 'development' ? {
+                code: error.code,
+                detail: error.detail,
+                constraint: error.constraint
+            } : undefined,
+            errorCode: 'REGISTRATION_FAILURE'
+        });
+
     } finally {
-        if (client) client.release();
+        if (client) {
+            try {
+                await client.release();
+            } catch (releaseError) {
+                console.error('Erro ao liberar conexão:', releaseError);
+            }
+        }
     }
 });
 
