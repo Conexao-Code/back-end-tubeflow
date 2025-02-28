@@ -5,7 +5,7 @@ const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');
 
-router.get('/channels', async (req, res) => {
+router.get('/channels3', async (req, res) => {
     let client;
     try {
         const companyId = req.query.companyId;
