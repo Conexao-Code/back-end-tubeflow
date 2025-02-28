@@ -14,7 +14,7 @@ router.use((req, res, next) => {
   next();
 });
 
-router.get('/channels', async (req, res) => {
+router.get('/channels2', async (req, res) => {
     let client;
     try {
         const { companyId } = req.query;
