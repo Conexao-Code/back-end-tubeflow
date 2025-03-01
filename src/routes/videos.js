@@ -443,7 +443,7 @@ router.get('/videos/:id/comments', async (req, res) => {
 });
 
 // Rotas de Canais
-router.get('/channels', async (req, res) => {
+router.get('/channels4', async (req, res) => {
   let client;
   try {
     const { companyId } = req.query;
@@ -474,7 +474,7 @@ router.get('/channels', async (req, res) => {
 });
 
 // Rotas de Freelancers
-router.get('/freelancers', async (req, res) => {
+router.get('/freelancers4', async (req, res) => {
   let client;
   try {
     const { companyId } = req.query;
