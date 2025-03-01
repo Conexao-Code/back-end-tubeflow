@@ -17,7 +17,7 @@ router.get('/dashboard', async (req, res) => {
     try {
         client = await req.db.connect();
         const userId = req.query.userId;
-        const isUser = req.query.isUser === 'true';
+        const isUser = req.query.isUser === 'true'; // Isso converterá '0' para false
         const companyId = req.query.companyId;
 
         // 1. Consulta Vídeos em Andamento
@@ -87,11 +87,13 @@ router.get('/dashboard', async (req, res) => {
         const recentActivitiesParams = isUser ? [companyId] : [companyId, userId];
 
         // Execução das consultas
-        const videosInProgressResult = await client.query(videosInProgressQuery, videosInProgressParams);
-        const videosCompletedResult = await client.query(videosCompletedQuery, videosCompletedParams);
-        const activeFreelancersResult = await client.query(activeFreelancersQuery, activeFreelancersParams);
-        const managedChannelsResult = await client.query(managedChannelsQuery, managedChannelsParams);
-        const recentActivitiesResult = await client.query(recentActivitiesQuery, recentActivitiesParams);
+        const [videosInProgressResult, videosCompletedResult, activeFreelancersResult, managedChannelsResult, recentActivitiesResult] = await Promise.all([
+            client.query(videosInProgressQuery, videosInProgressParams),
+            client.query(videosCompletedQuery, videosCompletedParams),
+            client.query(activeFreelancersQuery, activeFreelancersParams),
+            client.query(managedChannelsQuery, managedChannelsParams),
+            client.query(recentActivitiesQuery, recentActivitiesParams)
+        ]);
 
         // Formatação dos resultados
         const videosInProgress = parseInt(videosInProgressResult.rows[0].videosInProgress);
@@ -99,17 +101,20 @@ router.get('/dashboard', async (req, res) => {
         const activeFreelancers = parseInt(activeFreelancersResult.rows[0].activeFreelancers);
         const managedChannels = parseInt(managedChannelsResult.rows[0].managedChannels);
 
-        // Formatação das atividades
+        // Correção do erro: tratar casos onde toStatus é null
         const formattedActivities = recentActivitiesResult.rows.map(activity => {
             let message;
-            const toStatus = activity.toStatus.replace(/_/g, ' ');
+            const toStatus = (activity.toStatus || '').replace(/_/g, ' '); // Corrige o erro
+            const fromStatus = (activity.fromStatus || '').replace(/_/g, ' ');
 
             if (toStatus.includes('Em Andamento')) {
-                message = `${activity.user} deu início ao status "${toStatus}" para o vídeo "${activity.content}".`;
+                message = `${activity.user} iniciou "${toStatus}" no vídeo "${activity.content}".`;
             } else if (toStatus.includes('Concluído')) {
-                message = `${activity.user} concluiu o status "${toStatus}" para o vídeo "${activity.content}".`;
+                message = `${activity.user} concluiu "${toStatus}" no vídeo "${activity.content}".`;
+            } else if (toStatus) {
+                message = `${activity.user} alterou o status para "${toStatus}" no vídeo "${activity.content}".`;
             } else {
-                message = `${activity.user} alterou o status do vídeo "${activity.content}" para "${toStatus}".`;
+                message = `${activity.user} realizou a ação "${activity.action}" no vídeo "${activity.content}".`;
             }
 
             const minutesAgo = Math.floor(activity.minutesAgo);
