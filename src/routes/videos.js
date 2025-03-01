@@ -139,22 +139,6 @@ router.post('/videos', async (req, res) => {
 
         const videoId = videoResult.rows[0].id;
 
-        // Registro do log (ajustado para a estrutura correta)
-        await client.query(
-            `INSERT INTO video_logs (
-                video_id, user_id, action, 
-                created_at, duration, is_user, company_id
-            ) VALUES ($1, $2, $3, NOW(), $4, $5, $6)`,
-            [
-                videoId, 
-                userId, 
-                'Vídeo criado',
-                null, // duration
-                true, // is_user
-                companyId
-            ]
-        );
-
         res.status(201).json({ 
             id: videoId, 
             message: 'Vídeo criado com sucesso.',
