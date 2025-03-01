@@ -202,15 +202,6 @@ router.put('/videos/:id', async (req, res) => {
                 scriptWriterId, narratorId, editorId, thumbMakerId, id, companyId]
         );
 
-        // Registrar log
-        await client.query(
-            `INSERT INTO video_logs (
-        video_id, user_id, action, from_status, to_status,
-        timestamp, duration, is_user, company_id
-      ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8)`,
-            [id, userId, 'Vídeo atualizado', videoResult.rows[0].status, status, null, true, companyId]
-        );
-
         res.json({ message: 'Vídeo atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar vídeo:', error);
