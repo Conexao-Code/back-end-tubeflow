@@ -156,6 +156,49 @@ router.post('/videos', async (req, res) => {
     }
 });
 
+router.delete('/videos/:id', async (req, res) => {
+    let client;
+    try {
+        const { id } = req.params;
+        const { companyId } = req.query;
+
+        if (!companyId) {
+            return res.status(400).json({ message: 'Company ID é obrigatório' });
+        }
+
+        client = await req.db.connect();
+
+        // Primeiro deleta os logs relacionados
+        await client.query(
+            'DELETE FROM video_logs WHERE video_id = $1 AND company_id = $2',
+            [id, companyId]
+        );
+
+        // Depois deleta o vídeo
+        const result = await client.query(
+            'DELETE FROM videos WHERE id = $1 AND company_id = $2 RETURNING *',
+            [id, companyId]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ message: 'Vídeo não encontrado' });
+        }
+
+        res.json({ 
+            message: 'Vídeo excluído com sucesso',
+            deletedVideo: result.rows[0]
+        });
+    } catch (error) {
+        console.error('Erro ao excluir vídeo:', error);
+        res.status(500).json({
+            message: 'Erro ao excluir vídeo',
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        });
+    } finally {
+        if (client) client.release();
+    }
+});
+
 router.put('/videos/:id', async (req, res) => {
     let client;
     try {
