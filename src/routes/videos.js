@@ -269,8 +269,9 @@ router.put('/videos/:id/status', async (req, res) => {
             'Thumbnail_Concluída': null,
         };
 
+        // Validação de campos obrigatórios
         if (!companyId || !status || !userId) {
-            return res.status(400).json({ message: 'Parâmetros obrigatórios faltando' });
+            return res.status(400).json({ message: 'Company ID, status e user ID são obrigatórios' });
         }
 
         client = await req.db.connect();
@@ -278,10 +279,11 @@ router.put('/videos/:id/status', async (req, res) => {
         // Buscar vídeo
         const videoResult = await client.query(
             `SELECT id, title, status, updated_at, 
-       script_writer_id, narrator_id, editor_id, thumb_maker_id
-       FROM videos WHERE id = $1 AND company_id = $2`,
+             script_writer_id, narrator_id, editor_id, thumb_maker_id
+             FROM videos WHERE id = $1 AND company_id = $2`,
             [id, companyId]
         );
+        
         if (videoResult.rowCount === 0) {
             return res.status(404).json({ message: 'Vídeo não encontrado' });
         }
@@ -289,36 +291,38 @@ router.put('/videos/:id/status', async (req, res) => {
         const video = videoResult.rows[0];
         const currentStatus = video.status;
 
-        // Atualizar status
+        // Atualizar status principal
         await client.query(
             'UPDATE videos SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3',
             [status, id, companyId]
         );
 
         // Calcular duração
-        let duration = null;
+        let duration = 0;
         if (currentStatus.endsWith('_Em_Andamento') && status.endsWith('_Concluída')) {
             const startTime = new Date(video.updated_at).getTime();
             duration = Math.floor((Date.now() - startTime) / 1000);
         }
 
-        // Registrar log
+        // Registrar log com os nomes corretos das colunas
         await client.query(
             `INSERT INTO video_logs (
-        video_id, user_id, action, from_status, to_status,
-        timestamp, duration, is_user, company_id
-      ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8)`,
-            [id, userId, 'Status alterado', currentStatus, status, duration, isUser, companyId]
+                video_id, user_id, action, from_status, to_status,
+                created_at, duration, is_user, company_id
+            ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8)`,
+            [
+                id,
+                userId,
+                'Status alterado',
+                currentStatus,
+                status,
+                duration,
+                isUser,
+                companyId
+            ]
         );
 
-        // Verificar configurações
-        const settingsResult = await client.query(
-            'SELECT auto_notify FROM settings WHERE company_id = $1',
-            [companyId]
-        );
-        const autoNotify = settingsResult.rows[0]?.auto_notify || false;
-
-        // Notificações
+        // Lógica de notificação
         const statusToNotify = [
             'Roteiro_Solicitado',
             'Narração_Solicitada',
@@ -326,12 +330,26 @@ router.put('/videos/:id/status', async (req, res) => {
             'Thumbnail_Solicitada',
         ];
 
+        const settingsResult = await client.query(
+            'SELECT auto_notify FROM settings WHERE company_id = $1',
+            [companyId]
+        );
+        
+        const autoNotify = settingsResult.rows[0]?.auto_notify || false;
+
         if (statusToNotify.includes(status) && (sendMessage || autoNotify)) {
             let freelancerId;
-            if (status.startsWith('Roteiro')) freelancerId = video.script_writer_id;
-            else if (status.startsWith('Narração')) freelancerId = video.narrator_id;
-            else if (status.startsWith('Edição')) freelancerId = video.editor_id;
-            else if (status.startsWith('Thumbnail')) freelancerId = video.thumb_maker_id;
+            // Determinar o freelancer correto baseado no status
+            const roleMap = {
+                'Roteiro': 'script_writer_id',
+                'Narração': 'narrator_id',
+                'Edição': 'editor_id',
+                'Thumbnail': 'thumb_maker_id'
+            };
+
+            const prefix = status.split('_')[0];
+            const column = roleMap[prefix];
+            freelancerId = column ? video[column] : null;
 
             if (freelancerId) {
                 const freelancerResult = await client.query(
@@ -348,7 +366,7 @@ router.put('/videos/:id/status', async (req, res) => {
             }
         }
 
-        // Atualização automática de status
+        // Atualização automática para próximo status
         const nextStatus = nextStatusMap[status];
         if (nextStatus) {
             await client.query(
@@ -357,12 +375,18 @@ router.put('/videos/:id/status', async (req, res) => {
             );
         }
 
-        res.json({ message: 'Status atualizado com sucesso' });
+        res.json({ 
+            message: 'Status atualizado com sucesso',
+            newStatus: status,
+            nextStatus: nextStatus || 'Finalizado'
+        });
+
     } catch (error) {
         console.error('Erro ao atualizar status:', error);
         res.status(500).json({
             message: 'Erro ao atualizar status',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            details: process.env.NODE_ENV === 'development' ? error.stack : undefined
         });
     } finally {
         if (client) client.release();
