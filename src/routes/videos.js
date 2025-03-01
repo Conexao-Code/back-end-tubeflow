@@ -276,7 +276,30 @@ router.put('/videos/:id/status', async (req, res) => {
 
         client = await req.db.connect();
 
-        // Buscar vídeo
+        // Verificar e obter user_id válido
+        let validUserId = userId;
+        if (!isUser) {
+            // Se for freelancer, buscar user_id correspondente
+            const freelancerCheck = await client.query(
+                'SELECT user_id FROM freelancers WHERE id = $1 AND company_id = $2',
+                [userId, companyId]
+            );
+            if (!freelancerCheck.rows[0]?.user_id) {
+                return res.status(404).json({ message: 'Freelancer não encontrado' });
+            }
+            validUserId = freelancerCheck.rows[0].user_id;
+        } else {
+            // Verificar se usuário existe
+            const userCheck = await client.query(
+                'SELECT id FROM users WHERE id = $1 AND company_id = $2',
+                [userId, companyId]
+            );
+            if (!userCheck.rows[0]) {
+                return res.status(404).json({ message: 'Usuário não encontrado' });
+            }
+        }
+
+        // Buscar vídeo e status atual
         const videoResult = await client.query(
             `SELECT id, title, status, updated_at, 
              script_writer_id, narrator_id, editor_id, thumb_maker_id
@@ -297,14 +320,15 @@ router.put('/videos/:id/status', async (req, res) => {
             [status, id, companyId]
         );
 
-        // Calcular duração
+        // Calcular duração apenas na transição concluída
         let duration = 0;
         if (currentStatus.endsWith('_Em_Andamento') && status.endsWith('_Concluída')) {
-            const startTime = new Date(video.updated_at).getTime();
-            duration = Math.floor((Date.now() - startTime) / 1000);
+            const startTime = new Date(video.updated_at);
+            const endTime = new Date();
+            duration = Math.floor((endTime - startTime) / 1000); // Duração em segundos
         }
 
-        // Registrar log com os nomes corretos das colunas
+        // Registrar log com user_id validado
         await client.query(
             `INSERT INTO video_logs (
                 video_id, user_id, action, from_status, to_status,
@@ -312,7 +336,7 @@ router.put('/videos/:id/status', async (req, res) => {
             ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8)`,
             [
                 id,
-                userId,
+                validUserId, // Usa o user_id validado
                 'Status alterado',
                 currentStatus,
                 status,
@@ -321,6 +345,14 @@ router.put('/videos/:id/status', async (req, res) => {
                 companyId
             ]
         );
+
+        // Iniciar cronometragem se for novo status Em_Andamento
+        if (status.endsWith('_Em_Andamento')) {
+            await client.query(
+                'UPDATE videos SET updated_at = NOW() WHERE id = $1 AND company_id = $2',
+                [id, companyId]
+            );
+        }
 
         // Lógica de notificação
         const statusToNotify = [
@@ -339,7 +371,6 @@ router.put('/videos/:id/status', async (req, res) => {
 
         if (statusToNotify.includes(status) && (sendMessage || autoNotify)) {
             let freelancerId;
-            // Determinar o freelancer correto baseado no status
             const roleMap = {
                 'Roteiro': 'script_writer_id',
                 'Narração': 'narrator_id',
@@ -378,7 +409,8 @@ router.put('/videos/:id/status', async (req, res) => {
         res.json({ 
             message: 'Status atualizado com sucesso',
             newStatus: status,
-            nextStatus: nextStatus || 'Finalizado'
+            nextStatus: nextStatus || 'Finalizado',
+            duration: duration > 0 ? `${duration} segundos` : null
         });
 
     } catch (error) {
