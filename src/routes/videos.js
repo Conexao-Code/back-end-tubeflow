@@ -101,16 +101,17 @@ router.post('/videos', async (req, res) => {
     let client;
     try {
         const { companyId, title, channelId, status, observations, youtubeUrl,
-            scriptWriterId, narratorId, editorId, thumbMakerId, userId } = req.body;
+                scriptWriterId, narratorId, editorId, thumbMakerId, userId } = req.body;
 
-        if (!companyId || !title || !channelId || !status || !scriptWriterId ||
+        // Validação de campos obrigatórios
+        if (!companyId || !title || !channelId || !status || !scriptWriterId || 
             !narratorId || !editorId || !thumbMakerId || !userId) {
-            return res.status(400).json({ message: 'Campos obrigatórios faltando' });
+            return res.status(400).json({ message: 'Todos os campos obrigatórios devem ser preenchidos.' });
         }
 
         client = await req.db.connect();
 
-        // Validar freelancers
+        // Validação de freelancers
         const validations = await Promise.all([
             validateFreelancerExists(client, scriptWriterId, companyId),
             validateFreelancerExists(client, narratorId, companyId),
@@ -119,37 +120,51 @@ router.post('/videos', async (req, res) => {
         ]);
 
         if (validations.some(valid => !valid)) {
-            return res.status(400).json({ message: 'IDs de freelancers inválidos' });
+            return res.status(400).json({ message: 'Um ou mais IDs de freelancers são inválidos.' });
         }
 
-        // Inserir vídeo
-        const result = await client.query(
+        // Inserção do vídeo
+        const videoResult = await client.query(
             `INSERT INTO videos (
-        title, channel_id, status, observations, youtube_url,
-        script_writer_id, narrator_id, editor_id, thumb_maker_id,
-        company_id, created_at, updated_at
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
-      RETURNING id`,
-            [title, channelId, status, observations, youtubeUrl,
-                scriptWriterId, narratorId, editorId, thumbMakerId, companyId]
+                title, channel_id, status, observations, youtube_url,
+                script_writer_id, narrator_id, editor_id, thumb_maker_id,
+                company_id, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+            RETURNING id`,
+            [
+                title, channelId, status, observations, youtubeUrl,
+                scriptWriterId, narratorId, editorId, thumbMakerId, companyId
+            ]
         );
 
-        const videoId = result.rows[0].id;
+        const videoId = videoResult.rows[0].id;
 
-        // Registrar log
+        // Registro do log (ajustado para a estrutura correta)
         await client.query(
             `INSERT INTO video_logs (
-        video_id, user_id, action, from_status, to_status, 
-        timestamp, duration, is_user, company_id
-      ) VALUES ($1, $2, $3, $4, $5, NOW(), $6, $7, $8)`,
-            [videoId, userId, 'Vídeo criado', null, status, null, true, companyId]
+                video_id, user_id, action, 
+                timestamp, duration, is_user, company_id
+            ) VALUES ($1, $2, $3, NOW(), $4, $5, $6)`,
+            [
+                videoId, 
+                userId, 
+                'Vídeo criado', // action
+                null, // duration
+                true, // is_user
+                companyId
+            ]
         );
 
-        res.status(201).json({ id: videoId, message: 'Vídeo criado com sucesso' });
+        res.status(201).json({ 
+            id: videoId, 
+            message: 'Vídeo criado com sucesso.',
+            timestamp: new Date().toISOString()
+        });
+
     } catch (error) {
         console.error('Erro ao criar vídeo:', error);
-        res.status(500).json({
-            message: 'Erro ao criar vídeo',
+        res.status(500).json({ 
+            message: 'Erro ao criar vídeo.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
     } finally {
