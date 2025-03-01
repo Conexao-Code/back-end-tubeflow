@@ -143,12 +143,12 @@ router.post('/videos', async (req, res) => {
         await client.query(
             `INSERT INTO video_logs (
                 video_id, user_id, action, 
-                timestamp, duration, is_user, company_id
+                created_at, duration, is_user, company_id
             ) VALUES ($1, $2, $3, NOW(), $4, $5, $6)`,
             [
                 videoId, 
                 userId, 
-                'Vídeo criado', // action
+                'Vídeo criado',
                 null, // duration
                 true, // is_user
                 companyId
