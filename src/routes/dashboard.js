@@ -8,8 +8,8 @@ const pool = new Pool(config.dbConfig.postgres);
 
 // Middleware para injetar o pool nas requisições
 router.use((req, res, next) => {
-  req.db = pool;
-  next();
+    req.db = pool;
+    next();
 });
 
 router.get('/dashboard', async (req, res) => {
@@ -51,19 +51,19 @@ router.get('/dashboard', async (req, res) => {
         `;
 
         let recentActivitiesQuery = `
-            SELECT 
-                vl.id, 
-                u.name AS "user", 
-                vl.action, 
-                v.title AS "content", 
-                vl.old_status AS "fromStatus", 
-                vl.new_status AS "toStatus",   
-                EXTRACT(EPOCH FROM (NOW() - vl.created_at)) / 60 AS "minutesAgo"  
-            FROM video_logs vl
-            JOIN users u ON vl.user_id = u.id
-            JOIN videos v ON vl.video_id = v.id
-            WHERE v.company_id = $1
-        `;
+        SELECT 
+            vl.id, 
+            u.name AS "user", 
+            vl.action, 
+            v.title AS "content", 
+            vl.from_status AS "fromStatus",  
+            vl.to_status AS "toStatus",      
+            EXTRACT(EPOCH FROM (NOW() - vl.created_at)) / 60 AS "minutesAgo"  
+        FROM video_logs vl
+        JOIN users u ON vl.user_id = u.id
+        JOIN videos v ON vl.video_id = v.id
+        WHERE v.company_id = $1
+    `;
 
         if (!isUser) {
             recentActivitiesQuery += `
@@ -118,7 +118,7 @@ router.get('/dashboard', async (req, res) => {
             }
 
             const minutesAgo = Math.floor(activity.minutesAgo);
-            const timeAgo = minutesAgo < 60 
+            const timeAgo = minutesAgo < 60
                 ? `${minutesAgo} min atrás`
                 : `${Math.floor(minutesAgo / 60)}h atrás`;
 
@@ -140,7 +140,7 @@ router.get('/dashboard', async (req, res) => {
         });
     } catch (error) {
         console.error('Erro ao buscar dados do dashboard:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             message: 'Erro ao buscar dados do dashboard.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
