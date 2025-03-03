@@ -62,46 +62,76 @@ router.get('/freelancers2', async (req, res) => {
 router.get('/reports/data', async (req, res) => {
     let client;
     try {
-        const { companyId, startDate, endDate, channelId, freelancerId, status } = req.query;
+        const { 
+            companyId, 
+            startDate, 
+            endDate, 
+            channelId, 
+            freelancerId, 
+            status 
+        } = req.query;
 
+        // Validação obrigatória do companyId
         if (!companyId) {
-            return res.status(400).json({ message: 'Company ID é obrigatório' });
+            return res.status(400).json({
+                code: 'MISSING_COMPANY_ID',
+                message: 'Company ID é obrigatório',
+                details: 'Forneça o parâmetro companyId na query string'
+            });
         }
 
         client = await req.db.connect();
         let queryParams = [companyId];
         
+        // Query principal com filtros aprimorados
         let query = `
             SELECT 
                 v.id,
-                c.name AS channelName,
-                v.title AS videoTitle,
+                c.name AS "channelName",
+                v.title AS "videoTitle",
                 v.status,
-                COALESCE(AVG(l.duration), 0) AS averageTimeInSeconds,
-                v.created_at AS createdAt
+                COALESCE(SUM(l.duration), 0) AS "totalDuration",
+                COUNT(l.id) AS "totalTasks",
+                v.created_at AS "createdAt"
             FROM videos v
             LEFT JOIN channels c ON v.channel_id = c.id
-            LEFT JOIN video_logs l ON v.id = l.video_id
+            LEFT JOIN video_logs l ON v.id = l.video_id 
+                AND l.duration > 0
+                AND l.to_status IN (
+                    'Roteiro_Concluído',
+                    'Narração_Concluída',
+                    'Edição_Concluída',
+                    'Thumbnail_Concluída'
+                )
             WHERE v.company_id = $1
         `;
 
-        if (startDate) {
-            queryParams.push(startDate);
-            query += ` AND v.created_at >= $${queryParams.length}`;
-        }
+        // Adicionar condições de filtro
+        const addCondition = (value, column, operator = '>=') => {
+            if (value) {
+                queryParams.push(value);
+                query += ` AND ${column} ${operator} $${queryParams.length}`;
+            }
+        };
 
-        if (endDate) {
-            queryParams.push(endDate);
-            query += ` AND v.created_at <= $${queryParams.length}`;
-        }
+        // Filtro por data de criação do vídeo
+        addCondition(startDate, 'v.created_at', '>=');
+        addCondition(endDate, 'v.created_at', '<=');
 
+        // Filtro por canal
         if (channelId) {
             queryParams.push(channelId);
             query += ` AND v.channel_id = $${queryParams.length}`;
         }
 
+        // Filtro complexo por freelancer
         if (freelancerId) {
-            queryParams.push(freelancerId, freelancerId, freelancerId, freelancerId);
+            queryParams.push(
+                freelancerId, 
+                freelancerId, 
+                freelancerId, 
+                freelancerId
+            );
             query += `
                 AND (
                     v.script_writer_id = $${queryParams.length - 3}
@@ -112,35 +142,73 @@ router.get('/reports/data', async (req, res) => {
             `;
         }
 
+        // Filtro por status múltiplos
         if (status) {
             const statusList = status.split(',');
             query += ` AND v.status IN (${statusList.map((_, i) => `$${queryParams.length + i + 1}`).join(',')})`;
             queryParams.push(...statusList);
         }
 
+        // Agrupamento final
         query += ' GROUP BY v.id, c.name, v.title, v.status, v.created_at';
 
+        // Execução da query
         const result = await client.query(query, queryParams);
+        
+        // Processamento dos resultados
         const reportData = result.rows.map(item => {
-            const totalSeconds = Number(item.averagetimeinseconds);
-            const days = Math.floor(totalSeconds / 86400);
-            const hours = Math.floor((totalSeconds % 86400) / 3600);
-            const minutes = Math.floor((totalSeconds % 3600) / 60);
-            const seconds = Math.floor(totalSeconds % 60);
+            const totalDuration = Number(item.totalDuration);
+            const totalTasks = Number(item.totalTasks);
             
+            // Cálculo seguro da média
+            const averageSeconds = totalTasks > 0 
+                ? Math.round(totalDuration / totalTasks) 
+                : 0;
+
+            // Conversão para formato legível
+            const days = Math.floor(averageSeconds / 86400);
+            const hours = Math.floor((averageSeconds % 86400) / 3600);
+            const minutes = Math.floor((averageSeconds % 3600) / 60);
+            const seconds = Math.floor(averageSeconds % 60);
+
             return {
-                ...item,
-                averageTime: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`
+                id: item.id,
+                channelName: item.channelName,
+                videoTitle: item.videoTitle,
+                status: item.status.replace(/_/g, ' '),
+                averageTime: averageSeconds > 0 
+                    ? `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`
+                    : 'Não disponível',
+                rawData: {
+                    totalDuration,
+                    totalTasks,
+                    averageSeconds
+                }
             };
         });
 
         res.json(reportData);
+
     } catch (error) {
-        console.error('Erro ao gerar dados do relatório:', error);
-        res.status(500).json({ 
-            message: 'Erro ao gerar dados do relatório.',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined
+        console.error('Erro detalhado:', {
+            timestamp: new Date().toISOString(),
+            errorDetails: {
+                message: error.message,
+                stack: error.stack,
+                query: req.query,
+                params: req.params
+            }
         });
+
+        res.status(500).json({
+            code: 'REPORT_GENERATION_ERROR',
+            message: 'Falha na geração do relatório',
+            technicalDetails: process.env.NODE_ENV === 'development' ? {
+                error: error.message,
+                stack: error.stack
+            } : undefined
+        });
+
     } finally {
         if (client) client.release();
     }
