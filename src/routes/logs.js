@@ -10,8 +10,8 @@ const ExcelJS = require('exceljs');
 const pool = new Pool(config.dbConfig.postgres);
 
 router.use((req, res, next) => {
-  req.db = pool;
-  next();
+    req.db = pool;
+    next();
 });
 
 router.get('/channels2', async (req, res) => {
@@ -36,7 +36,7 @@ router.get('/freelancers3', async (req, res) => {
     let client;
     try {
         const { companyId } = req.query;
-        
+
         if (!companyId) {
             return res.status(400).json({ message: "Company ID é obrigatório." });
         }
@@ -46,7 +46,7 @@ router.get('/freelancers3', async (req, res) => {
             'SELECT id, name FROM freelancers WHERE company_id = $1',
             [companyId]
         );
-        
+
         res.json({ data: result.rows });
     } catch (error) {
         console.error('Erro ao buscar freelancers:', error);
@@ -58,27 +58,27 @@ router.get('/freelancers3', async (req, res) => {
 
 router.get('/logs2', async (req, res) => {
     let client;
-    let query; // Declarado fora do bloco try para acesso no catch
+    let query;
     try {
-        const { 
-            page = 1, 
-            limit = 10, 
-            startDate, 
-            endDate, 
-            channelId, 
+        const {
+            page = 1,
+            limit = 10,
+            startDate,
+            endDate,
+            channelId,
             freelancerId,
             companyId
         } = req.query;
 
         if (!companyId) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 message: "Company ID é obrigatório",
                 details: "Parâmetro 'companyId' não fornecido na query string"
             });
         }
 
         client = await req.db.connect();
-        
+
         let queryParams = [companyId];
         query = `
             SELECT 
@@ -93,8 +93,9 @@ router.get('/logs2', async (req, res) => {
             FROM video_logs l
             LEFT JOIN videos v ON l.video_id = v.id
             LEFT JOIN channels c ON v.channel_id = c.id
-            LEFT JOIN freelancers f ON l.user_id = f.id
-            WHERE v.company_id = $1 and v.is_user = false
+            LEFT JOIN freelancers f ON l.freelancer_id = f.id
+            WHERE v.company_id = $1
+            AND l.is_user = false  
         `;
 
         const addCondition = (value, column, operator = '>=') => {
@@ -107,7 +108,7 @@ router.get('/logs2', async (req, res) => {
         addCondition(startDate, 'l.created_at');
         addCondition(endDate, 'l.created_at', '<=');
         addCondition(channelId, 'v.channel_id');
-        addCondition(freelancerId, 'l.user_id');
+        addCondition(freelancerId, 'l.freelancer_id');
 
         const offset = (page - 1) * limit;
         query += `
@@ -124,6 +125,7 @@ router.get('/logs2', async (req, res) => {
             FROM video_logs l
             LEFT JOIN videos v ON l.video_id = v.id
             WHERE v.company_id = $1
+            AND l.is_user = false  
         `;
         const countParams = [companyId];
 
@@ -137,12 +139,12 @@ router.get('/logs2', async (req, res) => {
         addCountCondition(startDate, 'l.created_at');
         addCountCondition(endDate, 'l.created_at', '<=');
         addCountCondition(channelId, 'v.channel_id');
-        addCountCondition(freelancerId, 'l.user_id');
+        addCountCondition(freelancerId, 'l.freelancer_id');
 
         const countResult = await client.query(countQuery, countParams);
         const total = countResult.rows[0]?.total || 0;
 
-        res.json({ 
+        res.json({
             logs: logsResult.rows,
             total: parseInt(total, 10)
         });
@@ -150,11 +152,11 @@ router.get('/logs2', async (req, res) => {
     } catch (error) {
         console.error('Erro detalhado:', {
             message: error.message,
-            query: error.query || query, // Agora query está definida
+            query: error.query || query,
             parameters: error.parameters || queryParams
         });
 
-        res.status(500).json({ 
+        res.status(500).json({
             message: 'Erro ao buscar logs',
             error: {
                 code: error.code || 'DB_ERROR',
@@ -172,10 +174,10 @@ router.get('/stats', async (req, res) => {
     let client;
     let query; // Declarado fora do bloco try para acesso no catch
     try {
-        const { 
-            startDate, 
-            endDate, 
-            channelId, 
+        const {
+            startDate,
+            endDate,
+            channelId,
             freelancerId,
             companyId
         } = req.query;
@@ -318,12 +320,12 @@ router.get('/export', async (req, res) => {
     let client;
     let query; // Declarado fora do bloco try para acesso no catch
     try {
-        const { 
-            startDate, 
-            endDate, 
-            channelId, 
-            freelancerId, 
-            type, 
+        const {
+            startDate,
+            endDate,
+            channelId,
+            freelancerId,
+            type,
             format = 'csv',
             companyId
         } = req.query;
