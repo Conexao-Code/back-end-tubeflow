@@ -19,11 +19,11 @@ router.get('/channels3', async (req, res) => {
             'SELECT id, name FROM channels WHERE company_id = $1',
             [companyId]
         );
-
+        
         res.json({ channels: result.rows });
     } catch (error) {
         console.error('Erro ao buscar canais:', error);
-        res.status(500).json({
+        res.status(500).json({ 
             message: 'Erro ao buscar canais.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
@@ -46,11 +46,11 @@ router.get('/freelancers2', async (req, res) => {
             'SELECT id, name FROM freelancers WHERE company_id = $1',
             [companyId]
         );
-
+        
         res.json({ data: result.rows });
     } catch (error) {
         console.error('Erro ao buscar freelancers:', error);
-        res.status(500).json({
+        res.status(500).json({ 
             message: 'Erro ao buscar freelancers.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
@@ -62,25 +62,25 @@ router.get('/freelancers2', async (req, res) => {
 router.get('/reports/data', async (req, res) => {
     let client;
     try {
-        const {
-            companyId,
-            startDate,
-            endDate,
-            channelId,
-            freelancerId,
-            status
+        const { 
+            companyId, 
+            startDate, 
+            endDate, 
+            channelId, 
+            freelancerId, 
+            status 
         } = req.query;
 
         if (!companyId) {
-            return res.status(400).json({
+            return res.status(400).json({ 
                 code: 'MISSING_COMPANY_ID',
-                message: 'Company ID é obrigatório'
+                message: 'Company ID é obrigatório' 
             });
         }
 
         client = await req.db.connect();
         let queryParams = [companyId];
-
+        
         let query = `
             SELECT 
                 v.id,
@@ -125,27 +125,26 @@ router.get('/reports/data', async (req, res) => {
         }
 
         query += `
-        GROUP BY 
-            v.id, 
-            c.name, 
-            v.title, 
-            l.from_status, 
-            l.to_status,
-            l.created_at
-        ORDER BY 
-            v.title, 
-            l.created_at DESC
-    `;
+            GROUP BY 
+                v.id, 
+                c.name, 
+                v.title, 
+                l.from_status, 
+                l.to_status
+            ORDER BY 
+                v.title, 
+                l.created_at DESC
+        `;
 
         const result = await client.query(query, queryParams);
-
+        
         const reportData = result.rows.map(item => {
             const totalSeconds = Number(item.averageDuration);
             const days = Math.floor(totalSeconds / 86400);
             const hours = Math.floor((totalSeconds % 86400) / 3600);
             const minutes = Math.floor((totalSeconds % 3600) / 60);
             const seconds = Math.floor(totalSeconds % 60);
-
+            
             return {
                 id: item.id,
                 channelName: item.channelName,
@@ -170,7 +169,7 @@ router.get('/reports/data', async (req, res) => {
             stack: error.stack,
             query: req.query
         });
-        res.status(500).json({
+        res.status(500).json({ 
             code: 'REPORT_ERROR',
             message: 'Erro na geração do relatório',
             details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -184,7 +183,7 @@ router.get('/reports/stats', async (req, res) => {
     let client;
     try {
         const { companyId, startDate, endDate, channelId, freelancerId, status } = req.query;
-
+        
         if (!companyId) {
             return res.status(400).json({ message: 'Company ID é obrigatório' });
         }
@@ -345,7 +344,7 @@ router.get('/reports/stats', async (req, res) => {
         res.json(stats);
     } catch (error) {
         console.error('Erro ao buscar estatísticas:', error);
-        res.status(500).json({
+        res.status(500).json({ 
             message: 'Erro ao buscar estatísticas.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
@@ -365,7 +364,7 @@ router.get('/reports/status', async (req, res) => {
 
         client = await req.db.connect();
         let queryParams = [companyId];
-
+        
         let query = `
             SELECT v.status, COUNT(*) 
             FROM videos v
@@ -413,7 +412,7 @@ router.get('/reports/status', async (req, res) => {
         })));
     } catch (error) {
         console.error('Erro ao buscar contagem de status:', error);
-        res.status(500).json({
+        res.status(500).json({ 
             message: 'Erro ao buscar contagem de status.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
@@ -433,7 +432,7 @@ router.get('/reports/export', async (req, res) => {
 
         client = await req.db.connect();
         let queryParams = [companyId];
-
+        
         let query = `
             SELECT 
                 v.id,
@@ -490,7 +489,7 @@ router.get('/reports/export', async (req, res) => {
             const hours = Math.floor((totalSeconds % 86400) / 3600);
             const minutes = Math.floor((totalSeconds % 3600) / 60);
             const seconds = Math.floor(totalSeconds % 60);
-
+            
             return {
                 ...item,
                 averageTime: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`
@@ -563,7 +562,7 @@ router.get('/reports/export', async (req, res) => {
         }
     } catch (error) {
         console.error('Erro ao exportar relatório:', error);
-        res.status(500).json({
+        res.status(500).json({ 
             message: 'Erro ao exportar relatório.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
