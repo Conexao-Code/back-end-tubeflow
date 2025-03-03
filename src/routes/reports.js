@@ -71,42 +71,33 @@ router.get('/reports/data', async (req, res) => {
             status 
         } = req.query;
 
-        // Validação obrigatória do companyId
         if (!companyId) {
-            return res.status(400).json({
+            return res.status(400).json({ 
                 code: 'MISSING_COMPANY_ID',
-                message: 'Company ID é obrigatório',
-                details: 'Forneça o parâmetro companyId na query string'
+                message: 'Company ID é obrigatório' 
             });
         }
 
         client = await req.db.connect();
         let queryParams = [companyId];
         
-        // Query principal com filtros aprimorados
         let query = `
             SELECT 
                 v.id,
                 c.name AS "channelName",
                 v.title AS "videoTitle",
-                v.status,
-                COALESCE(SUM(l.duration), 0) AS "totalDuration",
-                COUNT(l.id) AS "totalTasks",
-                v.created_at AS "createdAt"
-            FROM videos v
+                l.from_status AS "fromStatus",
+                l.to_status AS "toStatus",
+                COALESCE(AVG(l.duration), 0) AS "averageDuration",
+                COUNT(l.id) AS "totalTransitions"
+            FROM video_logs l
+            INNER JOIN videos v ON l.video_id = v.id
             LEFT JOIN channels c ON v.channel_id = c.id
-            LEFT JOIN video_logs l ON v.id = l.video_id 
-                AND l.duration > 0
-                AND l.to_status IN (
-                    'Roteiro_Concluído',
-                    'Narração_Concluída',
-                    'Edição_Concluída',
-                    'Thumbnail_Concluída'
-                )
             WHERE v.company_id = $1
+            AND l.from_status IS NOT NULL
+            AND l.to_status IS NOT NULL
         `;
 
-        // Adicionar condições de filtro
         const addCondition = (value, column, operator = '>=') => {
             if (value) {
                 queryParams.push(value);
@@ -114,75 +105,58 @@ router.get('/reports/data', async (req, res) => {
             }
         };
 
-        // Filtro por data de criação do vídeo
-        addCondition(startDate, 'v.created_at', '>=');
-        addCondition(endDate, 'v.created_at', '<=');
+        addCondition(startDate, 'l.created_at');
+        addCondition(endDate, 'l.created_at', '<=');
 
-        // Filtro por canal
         if (channelId) {
             queryParams.push(channelId);
             query += ` AND v.channel_id = $${queryParams.length}`;
         }
 
-        // Filtro complexo por freelancer
         if (freelancerId) {
-            queryParams.push(
-                freelancerId, 
-                freelancerId, 
-                freelancerId, 
-                freelancerId
-            );
-            query += `
-                AND (
-                    v.script_writer_id = $${queryParams.length - 3}
-                    OR v.editor_id = $${queryParams.length - 2}
-                    OR v.narrator_id = $${queryParams.length - 1}
-                    OR v.thumb_maker_id = $${queryParams.length}
-                )
-            `;
+            queryParams.push(freelancerId);
+            query += ` AND l.freelancer_id = $${queryParams.length}`;
         }
 
-        // Filtro por status múltiplos
         if (status) {
             const statusList = status.split(',');
-            query += ` AND v.status IN (${statusList.map((_, i) => `$${queryParams.length + i + 1}`).join(',')})`;
+            query += ` AND l.to_status IN (${statusList.map((_, i) => `$${queryParams.length + i + 1}`).join(',')})`;
             queryParams.push(...statusList);
         }
 
-        // Agrupamento final
-        query += ' GROUP BY v.id, c.name, v.title, v.status, v.created_at';
+        query += `
+            GROUP BY 
+                v.id, 
+                c.name, 
+                v.title, 
+                l.from_status, 
+                l.to_status
+            ORDER BY 
+                v.title, 
+                l.created_at DESC
+        `;
 
-        // Execução da query
         const result = await client.query(query, queryParams);
         
-        // Processamento dos resultados
         const reportData = result.rows.map(item => {
-            const totalDuration = Number(item.totalDuration);
-            const totalTasks = Number(item.totalTasks);
+            const totalSeconds = Number(item.averageDuration);
+            const days = Math.floor(totalSeconds / 86400);
+            const hours = Math.floor((totalSeconds % 86400) / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = Math.floor(totalSeconds % 60);
             
-            // Cálculo seguro da média
-            const averageSeconds = totalTasks > 0 
-                ? Math.round(totalDuration / totalTasks) 
-                : 0;
-
-            // Conversão para formato legível
-            const days = Math.floor(averageSeconds / 86400);
-            const hours = Math.floor((averageSeconds % 86400) / 3600);
-            const minutes = Math.floor((averageSeconds % 3600) / 60);
-            const seconds = Math.floor(averageSeconds % 60);
-
             return {
                 id: item.id,
                 channelName: item.channelName,
                 videoTitle: item.videoTitle,
-                status: item.status.replace(/_/g, ' '),
-                averageTime: averageSeconds > 0 
-                    ? `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`
-                    : 'Não disponível',
+                statusTransition: {
+                    from: item.fromStatus.replace(/_/g, ' '),
+                    to: item.toStatus.replace(/_/g, ' ')
+                },
+                averageTime: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`,
                 rawData: {
-                    totalDuration,
-                    totalTasks,
-                    averageSeconds
+                    totalTransitions: item.totalTransitions,
+                    averageSeconds: totalSeconds
                 }
             };
         });
@@ -190,25 +164,16 @@ router.get('/reports/data', async (req, res) => {
         res.json(reportData);
 
     } catch (error) {
-        console.error('Erro detalhado:', {
-            timestamp: new Date().toISOString(),
-            errorDetails: {
-                message: error.message,
-                stack: error.stack,
-                query: req.query,
-                params: req.params
-            }
+        console.error('Erro ao gerar relatório:', {
+            error: error.message,
+            stack: error.stack,
+            query: req.query
         });
-
-        res.status(500).json({
-            code: 'REPORT_GENERATION_ERROR',
-            message: 'Falha na geração do relatório',
-            technicalDetails: process.env.NODE_ENV === 'development' ? {
-                error: error.message,
-                stack: error.stack
-            } : undefined
+        res.status(500).json({ 
+            code: 'REPORT_ERROR',
+            message: 'Erro na geração do relatório',
+            details: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
-
     } finally {
         if (client) client.release();
     }
