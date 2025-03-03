@@ -87,14 +87,14 @@ router.get('/logs2', async (req, res) => {
                 v.title AS "videoTitle", 
                 c.name AS "channelName", 
                 f.name AS "freelancerName", 
-                l.from_status AS "previousStatus",  -- Corrigido
-                l.to_status AS "newStatus",          -- Corrigido
+                l.from_status AS "previousStatus",
+                l.to_status AS "newStatus",       
                 l.created_at AS timestamp
             FROM video_logs l
             LEFT JOIN videos v ON l.video_id = v.id
             LEFT JOIN channels c ON v.channel_id = c.id
             LEFT JOIN freelancers f ON l.user_id = f.id
-            WHERE v.company_id = $1
+            WHERE v.company_id = $1 and v.is_user = false
         `;
 
         const addCondition = (value, column, operator = '>=') => {
