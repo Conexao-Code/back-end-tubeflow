@@ -19,11 +19,11 @@ router.get('/channels3', async (req, res) => {
             'SELECT id, name FROM channels WHERE company_id = $1',
             [companyId]
         );
-        
+
         res.json({ channels: result.rows });
     } catch (error) {
         console.error('Erro ao buscar canais:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             message: 'Erro ao buscar canais.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
@@ -46,11 +46,11 @@ router.get('/freelancers2', async (req, res) => {
             'SELECT id, name FROM freelancers WHERE company_id = $1',
             [companyId]
         );
-        
+
         res.json({ data: result.rows });
     } catch (error) {
         console.error('Erro ao buscar freelancers:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             message: 'Erro ao buscar freelancers.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
@@ -62,40 +62,39 @@ router.get('/freelancers2', async (req, res) => {
 router.get('/reports/data', async (req, res) => {
     let client;
     try {
-        const { 
-            companyId, 
-            startDate, 
-            endDate, 
-            channelId, 
-            freelancerId, 
-            status 
+        const {
+            companyId,
+            startDate,
+            endDate,
+            channelId,
+            freelancerId,
+            status
         } = req.query;
 
         if (!companyId) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 code: 'MISSING_COMPANY_ID',
-                message: 'Company ID é obrigatório' 
+                message: 'Company ID é obrigatório'
             });
         }
 
         client = await req.db.connect();
         let queryParams = [companyId];
-        
+
+        // Query modificada para buscar status atual do vídeo
         let query = `
             SELECT 
                 v.id,
                 c.name AS "channelName",
                 v.title AS "videoTitle",
-                l.from_status AS "fromStatus",
-                l.to_status AS "toStatus",
+                v.status AS "currentStatus",  -- Status atual da tabela videos
                 COALESCE(AVG(l.duration), 0) AS "averageDuration",
-                COUNT(l.id) AS "totalTransitions"
-            FROM video_logs l
-            INNER JOIN videos v ON l.video_id = v.id
+                COUNT(l.id) AS "totalTasks"
+            FROM videos v
             LEFT JOIN channels c ON v.channel_id = c.id
+            LEFT JOIN video_logs l ON v.id = l.video_id 
+                AND l.duration > 0
             WHERE v.company_id = $1
-            AND l.from_status IS NOT NULL
-            AND l.to_status IS NOT NULL
         `;
 
         const addCondition = (value, column, operator = '>=') => {
@@ -105,8 +104,9 @@ router.get('/reports/data', async (req, res) => {
             }
         };
 
-        addCondition(startDate, 'l.created_at');
-        addCondition(endDate, 'l.created_at', '<=');
+        // Filtros ajustados para usar created_at do vídeo
+        addCondition(startDate, 'v.created_at');
+        addCondition(endDate, 'v.created_at', '<=');
 
         if (channelId) {
             queryParams.push(channelId);
@@ -114,48 +114,51 @@ router.get('/reports/data', async (req, res) => {
         }
 
         if (freelancerId) {
-            queryParams.push(freelancerId);
-            query += ` AND l.freelancer_id = $${queryParams.length}`;
+            queryParams.push(freelancerId, freelancerId, freelancerId, freelancerId);
+            query += `
+                AND (
+                    v.script_writer_id = $${queryParams.length - 3}
+                    OR v.editor_id = $${queryParams.length - 2}
+                    OR v.narrator_id = $${queryParams.length - 1}
+                    OR v.thumb_maker_id = $${queryParams.length}
+                )
+            `;
         }
 
         if (status) {
             const statusList = status.split(',');
-            query += ` AND l.to_status IN (${statusList.map((_, i) => `$${queryParams.length + i + 1}`).join(',')})`;
+            query += ` AND v.status IN (${statusList.map((_, i) => `$${queryParams.length + i + 1}`).join(',')})`;
             queryParams.push(...statusList);
         }
 
+        // Group by simplificado sem from/to status
         query += `
             GROUP BY 
                 v.id, 
                 c.name, 
                 v.title, 
-                l.from_status, 
-                l.to_status
+                v.status
             ORDER BY 
-                v.title, 
-                l.created_at DESC
+                v.title
         `;
 
         const result = await client.query(query, queryParams);
-        
+
         const reportData = result.rows.map(item => {
             const totalSeconds = Number(item.averageDuration);
             const days = Math.floor(totalSeconds / 86400);
             const hours = Math.floor((totalSeconds % 86400) / 3600);
             const minutes = Math.floor((totalSeconds % 3600) / 60);
             const seconds = Math.floor(totalSeconds % 60);
-            
+
             return {
                 id: item.id,
                 channelName: item.channelName,
                 videoTitle: item.videoTitle,
-                statusTransition: {
-                    from: item.fromStatus.replace(/_/g, ' '),
-                    to: item.toStatus.replace(/_/g, ' ')
-                },
+                status: item.currentStatus.replace(/_/g, ' '),  // Status formatado
                 averageTime: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`,
                 rawData: {
-                    totalTransitions: item.totalTransitions,
+                    totalTasks: item.totalTasks,
                     averageSeconds: totalSeconds
                 }
             };
@@ -169,7 +172,7 @@ router.get('/reports/data', async (req, res) => {
             stack: error.stack,
             query: req.query
         });
-        res.status(500).json({ 
+        res.status(500).json({
             code: 'REPORT_ERROR',
             message: 'Erro na geração do relatório',
             details: process.env.NODE_ENV === 'development' ? error.message : undefined
@@ -183,7 +186,7 @@ router.get('/reports/stats', async (req, res) => {
     let client;
     try {
         const { companyId, startDate, endDate, channelId, freelancerId, status } = req.query;
-        
+
         if (!companyId) {
             return res.status(400).json({ message: 'Company ID é obrigatório' });
         }
@@ -344,7 +347,7 @@ router.get('/reports/stats', async (req, res) => {
         res.json(stats);
     } catch (error) {
         console.error('Erro ao buscar estatísticas:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             message: 'Erro ao buscar estatísticas.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
@@ -364,7 +367,7 @@ router.get('/reports/status', async (req, res) => {
 
         client = await req.db.connect();
         let queryParams = [companyId];
-        
+
         let query = `
             SELECT v.status, COUNT(*) 
             FROM videos v
@@ -412,7 +415,7 @@ router.get('/reports/status', async (req, res) => {
         })));
     } catch (error) {
         console.error('Erro ao buscar contagem de status:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             message: 'Erro ao buscar contagem de status.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
@@ -432,7 +435,7 @@ router.get('/reports/export', async (req, res) => {
 
         client = await req.db.connect();
         let queryParams = [companyId];
-        
+
         let query = `
             SELECT 
                 v.id,
@@ -489,7 +492,7 @@ router.get('/reports/export', async (req, res) => {
             const hours = Math.floor((totalSeconds % 86400) / 3600);
             const minutes = Math.floor((totalSeconds % 3600) / 60);
             const seconds = Math.floor(totalSeconds % 60);
-            
+
             return {
                 ...item,
                 averageTime: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`
@@ -562,7 +565,7 @@ router.get('/reports/export', async (req, res) => {
         }
     } catch (error) {
         console.error('Erro ao exportar relatório:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             message: 'Erro ao exportar relatório.',
             error: process.env.NODE_ENV === 'development' ? error.message : undefined
         });
