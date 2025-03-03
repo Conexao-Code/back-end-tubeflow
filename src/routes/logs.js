@@ -37,7 +37,6 @@ router.get('/freelancers3', async (req, res) => {
     try {
         const { companyId } = req.query;
         
-        // Validação do companyId
         if (!companyId) {
             return res.status(400).json({ message: "Company ID é obrigatório." });
         }
@@ -59,6 +58,7 @@ router.get('/freelancers3', async (req, res) => {
 
 router.get('/logs2', async (req, res) => {
     let client;
+    let query; // Declarado fora do bloco try para acesso no catch
     try {
         const { 
             page = 1, 
@@ -70,7 +70,6 @@ router.get('/logs2', async (req, res) => {
             companyId
         } = req.query;
 
-        // Validação inicial
         if (!companyId) {
             return res.status(400).json({ 
                 message: "Company ID é obrigatório",
@@ -81,15 +80,15 @@ router.get('/logs2', async (req, res) => {
         client = await req.db.connect();
         
         let queryParams = [companyId];
-        let query = `
+        query = `
             SELECT 
                 l.id, 
                 l.video_id AS "videoId", 
                 v.title AS "videoTitle", 
                 c.name AS "channelName", 
                 f.name AS "freelancerName", 
-                l.old_status AS "previousStatus", 
-                l.new_status AS "newStatus", 
+                l.from_status AS "previousStatus",  -- Corrigido
+                l.to_status AS "newStatus",          -- Corrigido
                 l.created_at AS timestamp
             FROM video_logs l
             LEFT JOIN videos v ON l.video_id = v.id
@@ -98,7 +97,6 @@ router.get('/logs2', async (req, res) => {
             WHERE v.company_id = $1
         `;
 
-        // Função auxiliar para adicionar condições
         const addCondition = (value, column, operator = '>=') => {
             if (value) {
                 queryParams.push(value);
@@ -111,7 +109,6 @@ router.get('/logs2', async (req, res) => {
         addCondition(channelId, 'v.channel_id');
         addCondition(freelancerId, 'l.user_id');
 
-        // Paginação
         const offset = (page - 1) * limit;
         query += `
             ORDER BY l.created_at DESC 
@@ -120,10 +117,8 @@ router.get('/logs2', async (req, res) => {
         `;
         queryParams.push(Number(limit), Number(offset));
 
-        // Execução da query
         const logsResult = await client.query(query, queryParams);
 
-        // Query de contagem (também corrigida)
         let countQuery = `
             SELECT COUNT(*) AS total 
             FROM video_logs l
@@ -155,7 +150,7 @@ router.get('/logs2', async (req, res) => {
     } catch (error) {
         console.error('Erro detalhado:', {
             message: error.message,
-            query: error.query || query,
+            query: error.query || query, // Agora query está definida
             parameters: error.parameters || queryParams
         });
 
@@ -175,6 +170,7 @@ router.get('/logs2', async (req, res) => {
 
 router.get('/stats', async (req, res) => {
     let client;
+    let query; // Declarado fora do bloco try para acesso no catch
     try {
         const { 
             startDate, 
@@ -184,7 +180,6 @@ router.get('/stats', async (req, res) => {
             companyId
         } = req.query;
 
-        // Validação inicial
         if (!companyId) {
             return res.status(400).json({
                 message: "Parâmetro obrigatório faltando",
@@ -195,7 +190,7 @@ router.get('/stats', async (req, res) => {
         client = await req.db.connect();
 
         let queryParams = [companyId];
-        let query = `
+        query = `
             SELECT 
                 f.id,
                 f.name,
@@ -230,17 +225,17 @@ router.get('/stats', async (req, res) => {
                         user_id,
                         SUM(
                             CASE 
-                                WHEN (new_status = 'Roteiro_Concluído' AND prev_status = 'Roteiro_Em_Andamento') OR
-                                     (new_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
-                                     (new_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
-                                     (new_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
+                                WHEN (to_status = 'Roteiro_Concluído' AND prev_status = 'Roteiro_Em_Andamento') OR
+                                     (to_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
+                                     (to_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
+                                     (to_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
                                 THEN EXTRACT(EPOCH FROM (created_at - prev_created_at))
                                 ELSE 0
                             END
                         ) AS duration_seconds,
                         SUM(
                             CASE 
-                                WHEN new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                                WHEN to_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
                                 THEN 1 ELSE 0
                             END
                         ) AS tasksCompleted
@@ -248,14 +243,14 @@ router.get('/stats', async (req, res) => {
                         SELECT 
                             video_id,
                             user_id,
-                            new_status,
+                            to_status,
                             created_at,
-                            LAG(new_status) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_status,
+                            LAG(to_status) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_status,
                             LAG(created_at) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_created_at
                         FROM video_logs
                         WHERE is_user = FALSE
                     ) AS log_pairs
-                    WHERE new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                    WHERE to_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
                     GROUP BY video_id, user_id
                 ) AS calculated_logs
                 GROUP BY video_id, user_id, tasksCompleted
@@ -263,7 +258,6 @@ router.get('/stats', async (req, res) => {
             WHERE f.company_id = $1
         `;
 
-        // Adicionar condições dinamicamente
         const addCondition = (value, column, operator = '>=') => {
             if (value) {
                 queryParams.push(value);
@@ -298,8 +292,8 @@ router.get('/stats', async (req, res) => {
         console.error('Erro detalhado:', {
             message: error.message,
             stack: error.stack,
-            query: error.query,
-            parameters: error.parameters
+            query: error.query || query, // Agora query está definida
+            parameters: error.parameters || queryParams
         });
 
         res.status(500).json({
@@ -322,6 +316,7 @@ router.get('/stats', async (req, res) => {
 
 router.get('/export', async (req, res) => {
     let client;
+    let query; // Declarado fora do bloco try para acesso no catch
     try {
         const { 
             startDate, 
@@ -336,19 +331,18 @@ router.get('/export', async (req, res) => {
         client = await req.db.connect();
 
         let queryParams = [companyId];
-        let query;
         let filename;
         let headers;
 
         if (type === 'logs') {
             query = `
                 SELECT 
-                    l.timestamp AS "Data/Hora", 
+                    l.created_at AS "Data/Hora", 
                     v.title AS "Título do Vídeo", 
                     c.name AS "Nome do Canal", 
                     f.name AS "Nome do Freelancer", 
-                    l.old_status AS "Status Anterior", 
-                    l.new_status AS "Status Atual"
+                    l.from_status AS "Status Anterior",  -- Corrigido
+                    l.to_status AS "Status Atual"        -- Corrigido
                 FROM video_logs l
                 LEFT JOIN videos v ON l.video_id = v.id
                 LEFT JOIN channels c ON v.channel_id = c.id
@@ -378,11 +372,11 @@ router.get('/export', async (req, res) => {
                             user_id,
                             SUM(
                                 CASE 
-                                    WHEN (new_status = 'Roteiro_Concluído' AND prev_status = 'Roteiro_Em_Andamento') OR
-                                         (new_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
-                                         (new_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
-                                         (new_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
-                                    THEN EXTRACT(EPOCH FROM (timestamp - prev_timestamp))
+                                    WHEN (to_status = 'Roteiro_Concluído' AND prev_status = 'Roteiro_Em_Andamento') OR
+                                         (to_status = 'Narração_Concluída' AND prev_status = 'Narração_Em_Andamento') OR
+                                         (to_status = 'Edição_Concluído' AND prev_status = 'Edição_Em_Andamento') OR
+                                         (to_status = 'Thumbnail_Concluída' AND prev_status = 'Thumbnail_Em_Andamento')
+                                    THEN EXTRACT(EPOCH FROM (created_at - prev_created_at))
                                     ELSE 0
                                 END
                             ) AS duration_seconds
@@ -390,13 +384,13 @@ router.get('/export', async (req, res) => {
                             SELECT 
                                 video_id,
                                 user_id,
-                                new_status,
-                                timestamp,
-                                LAG(new_status) OVER (PARTITION BY video_id, user_id ORDER BY timestamp) AS prev_status,
-                                LAG(timestamp) OVER (PARTITION BY video_id, user_id ORDER BY timestamp) AS prev_timestamp
+                                to_status,
+                                created_at,
+                                LAG(to_status) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_status,
+                                LAG(created_at) OVER (PARTITION BY video_id, user_id ORDER BY created_at) AS prev_created_at
                             FROM video_logs
                         ) AS log_pairs
-                        WHERE new_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
+                        WHERE to_status IN ('Roteiro_Concluído', 'Narração_Concluída', 'Edição_Concluído', 'Thumbnail_Concluída')
                         GROUP BY video_id, user_id
                     ) AS calculated_durations
                     GROUP BY video_id, user_id
@@ -478,7 +472,11 @@ router.get('/export', async (req, res) => {
             res.status(400).json({ message: 'Formato inválido. Use "csv" ou "excel".' });
         }
     } catch (error) {
-        console.error('Erro ao exportar dados:', error);
+        console.error('Erro ao exportar dados:', {
+            message: error.message,
+            query: error.query || query,
+            parameters: error.parameters || queryParams
+        });
         res.status(500).json({ message: 'Erro ao exportar dados.' });
     } finally {
         if (client) client.release();
