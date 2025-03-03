@@ -259,6 +259,8 @@ router.put('/videos/:id', async (req, res) => {
 
 router.put('/videos/:id/status', async (req, res) => {
     let client;
+    const SYSTEM_USER_ID = 0; // ID do usuário sistema pré-configurado
+
     try {
         const { id } = req.params;
         const { companyId, status, userId, isUser, sendMessage } = req.body;
@@ -269,10 +271,12 @@ router.put('/videos/:id/status', async (req, res) => {
             'Thumbnail_Concluída': null,
         };
 
-        // Validação de campos obrigatórios
+        // Validação rigorosa dos campos
         if (!companyId || !status || !userId) {
-            return res.status(400).json({ 
-                message: 'Company ID, status e user ID são obrigatórios' 
+            return res.status(400).json({
+                message: 'Parâmetros obrigatórios faltando',
+                required: ['companyId', 'status', 'userId'],
+                received: req.body
             });
         }
 
@@ -281,41 +285,64 @@ router.put('/videos/:id/status', async (req, res) => {
         let validUserId = null;
         let freelancerId = null;
 
-        // Lógica corrigida para freelancers
         if (!isUser) {
-            // Busca apenas o ID do freelancer
+            // Lógica para freelancer
             const freelancerCheck = await client.query(
                 'SELECT id FROM freelancers WHERE id = $1 AND company_id = $2',
                 [userId, companyId]
             );
             
             if (!freelancerCheck.rows[0]) {
-                return res.status(404).json({ message: 'Freelancer não encontrado' });
+                return res.status(404).json({
+                    message: 'Freelancer não encontrado',
+                    details: `ID ${userId} na empresa ${companyId}`
+                });
             }
             
             freelancerId = freelancerCheck.rows[0].id;
-            validUserId = companyId; // Solução temporária usando company_id como user_id
+
+            // Verificar usuário sistema
+            const systemUserCheck = await client.query(
+                'SELECT id FROM users WHERE id = $1 AND company_id = $2',
+                [SYSTEM_USER_ID, companyId]
+            );
+            
+            if (!systemUserCheck.rows[0]) {
+                return res.status(500).json({
+                    code: 'MISSING_SYSTEM_USER',
+                    message: 'Usuário sistema não configurado',
+                    solution: `Execute: 
+                        INSERT INTO users (id, company_id, name, email, role, password)
+                        VALUES (${SYSTEM_USER_ID}, ${companyId}, 'Sistema', 'sistema@empresa.com', 'admin', 'senha_criptografada')`
+                });
+            }
+            
+            validUserId = SYSTEM_USER_ID;
+
         } else {
-            // Verificação para usuários normais
+            // Lógica para usuário normal
             const userCheck = await client.query(
                 'SELECT id FROM users WHERE id = $1 AND company_id = $2',
                 [userId, companyId]
             );
             
             if (!userCheck.rows[0]) {
-                return res.status(404).json({ message: 'Usuário não encontrado' });
+                return res.status(404).json({
+                    message: 'Usuário não encontrado',
+                    details: `ID ${userId} na empresa ${companyId}`
+                });
             }
             validUserId = userId;
         }
 
-        // Buscar detalhes do vídeo
+        // Obter dados do vídeo
         const videoResult = await client.query(
             `SELECT 
                 id, 
                 title, 
                 status, 
                 updated_at, 
-                script_writer_id, 
+                script_writer_id,
                 narrator_id, 
                 editor_id, 
                 thumb_maker_id
@@ -325,27 +352,31 @@ router.put('/videos/:id/status', async (req, res) => {
         );
         
         if (videoResult.rowCount === 0) {
-            return res.status(404).json({ message: 'Vídeo não encontrado' });
+            return res.status(404).json({
+                message: 'Vídeo não encontrado',
+                videoId: id,
+                companyId: companyId
+            });
         }
 
         const video = videoResult.rows[0];
         const currentStatus = video.status;
 
-        // Atualizar status principal
+        // Atualização principal do status
         await client.query(
             'UPDATE videos SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3',
             [status, id, companyId]
         );
 
-        // Calcular duração da etapa
+        // Cálculo de duração
         let duration = 0;
         if (currentStatus.endsWith('_Em_Andamento') && status.endsWith('_Concluída')) {
             const startTime = new Date(video.updated_at);
             const endTime = new Date();
-            duration = Math.floor((endTime - startTime) / 1000); // Segundos
+            duration = Math.floor((endTime - startTime) / 1000);
         }
 
-        // Registrar log com estrutura corrigida
+        // Registro do log com FK válida
         await client.query(
             `INSERT INTO video_logs (
                 video_id,
@@ -361,9 +392,9 @@ router.put('/videos/:id/status', async (req, res) => {
             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9)`,
             [
                 id,
-                validUserId,       // company_id para freelancers, user_id para usuários
-                freelancerId,      // null para usuários
-                'Status alterado',
+                validUserId,     // Garantido pelo sistema
+                freelancerId,    // Null para usuários normais
+                'Status Update',
                 currentStatus,
                 status,
                 duration,
@@ -372,7 +403,7 @@ router.put('/videos/:id/status', async (req, res) => {
             ]
         );
 
-        // Reiniciar timer para status Em_Andamento
+        // Reiniciar timer se novo status for Em_Andamento
         if (status.endsWith('_Em_Andamento')) {
             await client.query(
                 'UPDATE videos SET updated_at = NOW() WHERE id = $1 AND company_id = $2',
@@ -380,7 +411,7 @@ router.put('/videos/:id/status', async (req, res) => {
             );
         }
 
-        // Lógica de notificação
+        // Notificações
         const statusToNotify = [
             'Roteiro_Solicitado',
             'Narração_Solicitada',
@@ -423,7 +454,7 @@ router.put('/videos/:id/status', async (req, res) => {
             }
         }
 
-        // Atualização automática para próximo status
+        // Transição automática para próximo status
         const nextStatus = nextStatusMap[status];
         if (nextStatus) {
             await client.query(
@@ -432,29 +463,38 @@ router.put('/videos/:id/status', async (req, res) => {
             );
         }
 
-        res.json({ 
+        res.json({
+            success: true,
             message: 'Status atualizado com sucesso',
-            newStatus: status,
-            nextStatus: nextStatus || 'Finalizado',
-            duration: duration > 0 ? `${duration} segundos` : null
+            data: {
+                videoId: id,
+                previousStatus: currentStatus,
+                newStatus: status,
+                nextStatus: nextStatus || 'Fluxo concluído',
+                duration: duration > 0 ? `${duration}s` : 'Não aplicável'
+            }
         });
 
     } catch (error) {
-        console.error('Erro detalhado ao atualizar status:', {
-            message: error.message,
-            stack: error.stack,
-            query: error.query,
-            parameters: error.parameters
+        console.error('Erro crítico:', {
+            timestamp: new Date().toISOString(),
+            errorDetails: {
+                message: error.message,
+                stack: error.stack,
+                query: error.query,
+                parameters: error.parameters,
+                route: '/videos/:id/status'
+            }
         });
         
         res.status(500).json({
-            message: 'Erro ao atualizar status',
-            error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-            details: process.env.NODE_ENV === 'development' ? {
-                stack: error.stack,
-                query: error.query,
-                parameters: error.parameters
-            } : undefined
+            code: 'VIDEO_STATUS_UPDATE_FAILED',
+            message: 'Falha na atualização de status',
+            technicalDetails: process.env.NODE_ENV === 'development' ? {
+                error: error.message,
+                stack: error.stack
+            } : undefined,
+            action: 'Contacte o suporte técnico com o código de erro'
         });
     } finally {
         if (client) client.release();
