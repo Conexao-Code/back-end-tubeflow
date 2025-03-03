@@ -259,21 +259,22 @@ router.put('/videos/:id', async (req, res) => {
 
 router.put('/videos/:id/status', async (req, res) => {
     let client;
-    const SYSTEM_USER_ID = 0; // ID do usuário sistema pré-configurado
+    const SYSTEM_USER_ID = 0; // ID fixo para usuário sistema
 
     try {
-        const { id } = req.params;
-        const { companyId, status, userId, isUser, sendMessage } = req.body;
-        const nextStatusMap = {
-            'Roteiro_Concluído': 'Narração_Solicitada',
-            'Narração_Concluída': 'Edição_Solicitada',
-            'Edição_Concluída': 'Thumbnail_Solicitada',
-            'Thumbnail_Concluída': null,
-        };
+        const { id: videoId } = req.params;
+        const { 
+            companyId, 
+            status, 
+            userId: rawUserId, 
+            isUser, 
+            sendMessage 
+        } = req.body;
 
-        // Validação rigorosa dos campos
-        if (!companyId || !status || !userId) {
+        // Validação completa dos parâmetros
+        if (!companyId || !status || !rawUserId) {
             return res.status(400).json({
+                code: 'MISSING_PARAMETERS',
                 message: 'Parâmetros obrigatórios faltando',
                 required: ['companyId', 'status', 'userId'],
                 received: req.body
@@ -282,101 +283,115 @@ router.put('/videos/:id/status', async (req, res) => {
 
         client = await req.db.connect();
 
+        // Conversão explícita de tipos
+        const userId = parseInt(rawUserId);
+        const numericCompanyId = parseInt(companyId);
+
         let validUserId = null;
         let freelancerId = null;
 
         if (!isUser) {
-            // Lógica para freelancer
+            // Validação freelancer
             const freelancerCheck = await client.query(
-                'SELECT id FROM freelancers WHERE id = $1 AND company_id = $2',
-                [userId, companyId]
+                `SELECT id 
+                FROM freelancers 
+                WHERE id = $1 
+                AND company_id = $2 
+                AND deleted_at IS NULL`,
+                [userId, numericCompanyId]
             );
-            
+
             if (!freelancerCheck.rows[0]) {
                 return res.status(404).json({
-                    message: 'Freelancer não encontrado',
-                    details: `ID ${userId} na empresa ${companyId}`
+                    code: 'FREELANCER_NOT_FOUND',
+                    message: 'Freelancer não encontrado ou excluído',
+                    details: { freelancerId: userId, companyId: numericCompanyId }
                 });
             }
-            
             freelancerId = freelancerCheck.rows[0].id;
 
-            // Verificar usuário sistema
-            const systemUserCheck = await client.query(
-                'SELECT id FROM users WHERE id = $1 AND company_id = $2',
-                [SYSTEM_USER_ID, companyId]
-            );
-            
-            if (!systemUserCheck.rows[0]) {
-                return res.status(500).json({
-                    code: 'MISSING_SYSTEM_USER',
-                    message: 'Usuário sistema não configurado',
-                    solution: `Execute: 
-                        INSERT INTO users (id, company_id, name, email, role, password)
-                        VALUES (${SYSTEM_USER_ID}, ${companyId}, 'Sistema', 'sistema@empresa.com', 'admin', 'senha_criptografada')`
-                });
-            }
-            
-            validUserId = SYSTEM_USER_ID;
-
         } else {
-            // Lógica para usuário normal
+            // Validação usuário normal
             const userCheck = await client.query(
-                'SELECT id FROM users WHERE id = $1 AND company_id = $2',
-                [userId, companyId]
+                `SELECT id 
+                FROM users 
+                WHERE id = $1 
+                AND company_id = $2 
+                AND deleted_at IS NULL`,
+                [userId, numericCompanyId]
             );
-            
+
             if (!userCheck.rows[0]) {
                 return res.status(404).json({
-                    message: 'Usuário não encontrado',
-                    details: `ID ${userId} na empresa ${companyId}`
+                    code: 'USER_NOT_FOUND',
+                    message: 'Usuário não encontrado ou excluído',
+                    details: { userId, companyId: numericCompanyId }
                 });
             }
             validUserId = userId;
         }
 
-        // Obter dados do vídeo
+        // Buscar vídeo com bloqueio de linha
         const videoResult = await client.query(
-            `SELECT 
-                id, 
-                title, 
-                status, 
-                updated_at, 
-                script_writer_id,
-                narrator_id, 
-                editor_id, 
-                thumb_maker_id
-            FROM videos 
-            WHERE id = $1 AND company_id = $2`,
-            [id, companyId]
+            `SELECT *
+            FROM videos
+            WHERE id = $1
+            AND company_id = $2
+            FOR UPDATE`,
+            [videoId, numericCompanyId]
         );
-        
+
         if (videoResult.rowCount === 0) {
             return res.status(404).json({
+                code: 'VIDEO_NOT_FOUND',
                 message: 'Vídeo não encontrado',
-                videoId: id,
-                companyId: companyId
+                details: { videoId, companyId: numericCompanyId }
             });
         }
 
         const video = videoResult.rows[0];
         const currentStatus = video.status;
 
-        // Atualização principal do status
-        await client.query(
-            'UPDATE videos SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3',
-            [status, id, companyId]
+        // Validação de transição de status
+        const allowedTransitions = {
+            'Roteiro_Em_Andamento': ['Roteiro_Concluído'],
+            'Narração_Em_Andamento': ['Narração_Concluída'],
+            'Edição_Em_Andamento': ['Edição_Concluída'],
+            'Thumbnail_Em_Andamento': ['Thumbnail_Concluída']
+        };
+
+        if (allowedTransitions[currentStatus] && !allowedTransitions[currentStatus].includes(status)) {
+            return res.status(400).json({
+                code: 'INVALID_STATUS_TRANSITION',
+                message: 'Transição de status inválida',
+                currentStatus,
+                attemptedStatus: status,
+                allowedTransitions: allowedTransitions[currentStatus]
+            });
+        }
+
+        // Atualização principal com retorno dos dados
+        const updateResult = await client.query(
+            `UPDATE videos
+            SET status = $1,
+                updated_at = NOW()
+            WHERE id = $2
+            AND company_id = $3
+            RETURNING *`,
+            [status, videoId, numericCompanyId]
         );
 
-        // Cálculo de duração
+        const updatedVideo = updateResult.rows[0];
+
+        // Cálculo de duração preciso
         let duration = 0;
         if (currentStatus.endsWith('_Em_Andamento') && status.endsWith('_Concluída')) {
             const startTime = new Date(video.updated_at);
-            const endTime = new Date();
+            const endTime = new Date(updatedVideo.updated_at);
             duration = Math.floor((endTime - startTime) / 1000);
         }
 
-        // Registro do log com FK válida
+        // Registro de log transacional
         await client.query(
             `INSERT INTO video_logs (
                 video_id,
@@ -391,111 +406,114 @@ router.put('/videos/:id/status', async (req, res) => {
                 company_id
             ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8, $9)`,
             [
-                id,
-                validUserId,     // Garantido pelo sistema
-                freelancerId,    // Null para usuários normais
-                'Status Update',
+                videoId,
+                validUserId,
+                freelancerId,
+                'Alteração de Status',
                 currentStatus,
                 status,
                 duration,
                 isUser,
-                companyId
+                numericCompanyId
             ]
         );
 
-        // Reiniciar timer se novo status for Em_Andamento
-        if (status.endsWith('_Em_Andamento')) {
+        // Atualização do próximo status automatizado
+        const nextStatusMap = {
+            'Roteiro_Concluído': 'Narração_Solicitada',
+            'Narração_Concluída': 'Edição_Solicitada',
+            'Edição_Concluída': 'Thumbnail_Solicitada',
+            'Thumbnail_Concluída': null,
+        };
+
+        const nextStatus = nextStatusMap[status];
+        if (nextStatus) {
             await client.query(
-                'UPDATE videos SET updated_at = NOW() WHERE id = $1 AND company_id = $2',
-                [id, companyId]
+                `UPDATE videos
+                SET status = $1,
+                    updated_at = NOW()
+                WHERE id = $2
+                AND company_id = $3`,
+                [nextStatus, videoId, numericCompanyId]
             );
         }
 
-        // Notificações
-        const statusToNotify = [
-            'Roteiro_Solicitado',
-            'Narração_Solicitada',
-            'Edição_Solicitada',
-            'Thumbnail_Solicitada',
-        ];
-
-        const settingsResult = await client.query(
-            'SELECT auto_notify FROM settings WHERE company_id = $1',
-            [companyId]
-        );
-        
-        const autoNotify = settingsResult.rows[0]?.auto_notify || false;
-
-        if (statusToNotify.includes(status) && (sendMessage || autoNotify)) {
-            let targetFreelancerId;
-            const roleMap = {
-                'Roteiro': 'script_writer_id',
-                'Narração': 'narrator_id',
-                'Edição': 'editor_id',
-                'Thumbnail': 'thumb_maker_id'
+        // Notificação via WhatsApp
+        if (sendMessage) {
+            const notificationConfig = {
+                'Roteiro_Solicitado': { role: 'script_writer_id', message: 'roteiro' },
+                'Narração_Solicitada': { role: 'narrator_id', message: 'narração' },
+                'Edição_Solicitada': { role: 'editor_id', message: 'edição' },
+                'Thumbnail_Solicitada': { role: 'thumb_maker_id', message: 'thumbnail' }
             };
 
-            const prefix = status.split('_')[0];
-            const column = roleMap[prefix];
-            targetFreelancerId = column ? video[column] : null;
+            const config = notificationConfig[status];
+            if (config) {
+                const freelancerId = video[config.role];
+                if (freelancerId) {
+                    const freelancerResult = await client.query(
+                        `SELECT name, phone 
+                        FROM freelancers 
+                        WHERE id = $1 
+                        AND company_id = $2`,
+                        [freelancerId, numericCompanyId]
+                    );
 
-            if (targetFreelancerId) {
-                const freelancerResult = await client.query(
-                    'SELECT name, phone FROM freelancers WHERE id = $1 AND company_id = $2',
-                    [targetFreelancerId, companyId]
-                );
-
-                if (freelancerResult.rowCount > 0) {
-                    const { phone, name } = freelancerResult.rows[0];
-                    if (phone) {
-                        await sendWhatsAppMessage(client, companyId, phone, video.title, name);
+                    if (freelancerResult.rows[0]?.phone) {
+                        await sendWhatsAppMessage({
+                            companyId: numericCompanyId,
+                            phone: freelancerResult.rows[0].phone,
+                            videoTitle: updatedVideo.title,
+                            freelancerName: freelancerResult.rows[0].name,
+                            task: config.message
+                        });
                     }
                 }
             }
         }
 
-        // Transição automática para próximo status
-        const nextStatus = nextStatusMap[status];
-        if (nextStatus) {
-            await client.query(
-                'UPDATE videos SET status = $1, updated_at = NOW() WHERE id = $2 AND company_id = $3',
-                [nextStatus, id, companyId]
-            );
-        }
-
         res.json({
             success: true,
-            message: 'Status atualizado com sucesso',
             data: {
-                videoId: id,
-                previousStatus: currentStatus,
-                newStatus: status,
-                nextStatus: nextStatus || 'Fluxo concluído',
-                duration: duration > 0 ? `${duration}s` : 'Não aplicável'
+                video: {
+                    id: updatedVideo.id,
+                    previousStatus: currentStatus,
+                    newStatus: updatedVideo.status,
+                    nextStatus,
+                    duration: duration > 0 ? `${duration} segundos` : null,
+                    lastUpdated: updatedVideo.updated_at
+                },
+                log: {
+                    user_id: validUserId,
+                    freelancer_id: freelancerId,
+                    is_user: isUser
+                }
             }
         });
 
     } catch (error) {
-        console.error('Erro crítico:', {
+        console.error('Erro na atualização de status:', {
             timestamp: new Date().toISOString(),
-            errorDetails: {
+            error: {
                 message: error.message,
                 stack: error.stack,
-                query: error.query,
-                parameters: error.parameters,
-                route: '/videos/:id/status'
+                code: error.code,
+                parameters: req.body
             }
         });
-        
+
         res.status(500).json({
-            code: 'VIDEO_STATUS_UPDATE_FAILED',
-            message: 'Falha na atualização de status',
-            technicalDetails: process.env.NODE_ENV === 'development' ? {
-                error: error.message,
-                stack: error.stack
-            } : undefined,
-            action: 'Contacte o suporte técnico com o código de erro'
+            code: 'INTERNAL_SERVER_ERROR',
+            message: 'Erro na atualização de status',
+            trackingId: uuidv4(),
+            ...(process.env.NODE_ENV === 'development' && {
+                debug: {
+                    error: error.message,
+                    stack: error.stack
+                }
+            })
         });
+
     } finally {
         if (client) client.release();
     }
