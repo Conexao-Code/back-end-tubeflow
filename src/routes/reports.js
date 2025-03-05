@@ -81,15 +81,15 @@ router.get('/reports/data', async (req, res) => {
         client = await req.db.connect();
         let queryParams = [companyId];
 
-        // Query modificada para buscar status atual do vídeo
         let query = `
             SELECT 
                 v.id,
                 c.name AS "channelName",
                 v.title AS "videoTitle",
-                v.status AS "currentStatus",  -- Status atual da tabela videos
+                v.status AS "currentStatus",
                 COALESCE(AVG(l.duration), 0) AS "averageDuration",
-                COUNT(l.id) AS "totalTasks"
+                COUNT(l.id) AS "totalTasks",
+                COALESCE(ARRAY_AGG(l.created_at) FILTER (WHERE l.created_at IS NOT NULL), '{}'::timestamp[]) AS "logDates"
             FROM videos v
             LEFT JOIN channels c ON v.channel_id = c.id
             LEFT JOIN video_logs l ON v.id = l.video_id 
@@ -104,7 +104,6 @@ router.get('/reports/data', async (req, res) => {
             }
         };
 
-        // Filtros ajustados para usar created_at do vídeo
         addCondition(startDate, 'v.created_at');
         addCondition(endDate, 'v.created_at', '<=');
 
@@ -131,7 +130,6 @@ router.get('/reports/data', async (req, res) => {
             queryParams.push(...statusList);
         }
 
-        // Group by simplificado sem from/to status
         query += `
             GROUP BY 
                 v.id, 
@@ -155,12 +153,13 @@ router.get('/reports/data', async (req, res) => {
                 id: item.id,
                 channelName: item.channelName,
                 videoTitle: item.videoTitle,
-                status: item.currentStatus.replace(/_/g, ' '),  // Status formatado
+                status: item.currentStatus.replace(/_/g, ' '),
                 averageTime: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`,
                 rawData: {
                     totalTasks: item.totalTasks,
                     averageSeconds: totalSeconds
-                }
+                },
+                logDates: item.logDates.map(date => date.toISOString())
             };
         });
 
