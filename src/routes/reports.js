@@ -81,21 +81,19 @@ router.get('/reports/data', async (req, res) => {
         client = await req.db.connect();
         let queryParams = [companyId];
 
-        // Query modificada para incluir dados temporais dos logs
+        // Query modificada para buscar status atual do vídeo
         let query = `
             SELECT 
                 v.id,
                 c.name AS "channelName",
                 v.title AS "videoTitle",
-                v.status AS "currentStatus",
-                l.created_at AS "logDate",  -- Nova coluna com data do log
-                l.duration AS "logDuration",
-                l.to_status AS "targetStatus"
+                v.status AS "currentStatus",  -- Status atual da tabela videos
+                COALESCE(AVG(l.duration), 0) AS "averageDuration",
+                COUNT(l.id) AS "totalTasks"
             FROM videos v
             LEFT JOIN channels c ON v.channel_id = c.id
             LEFT JOIN video_logs l ON v.id = l.video_id 
                 AND l.duration > 0
-                AND l.action = 'status_change'  -- Filtra apenas logs relevantes
             WHERE v.company_id = $1
         `;
 
@@ -106,9 +104,9 @@ router.get('/reports/data', async (req, res) => {
             }
         };
 
-        // Filtros ajustados para usar data do log
-        addCondition(startDate, 'l.created_at');
-        addCondition(endDate, 'l.created_at', '<=');
+        // Filtros ajustados para usar created_at do vídeo
+        addCondition(startDate, 'v.created_at');
+        addCondition(endDate, 'v.created_at', '<=');
 
         if (channelId) {
             queryParams.push(channelId);
@@ -133,16 +131,21 @@ router.get('/reports/data', async (req, res) => {
             queryParams.push(...statusList);
         }
 
-        // Ordenação por data do log
+        // Group by simplificado sem from/to status
         query += `
+            GROUP BY 
+                v.id, 
+                c.name, 
+                v.title, 
+                v.status
             ORDER BY 
-                l.created_at ASC
+                v.title
         `;
 
         const result = await client.query(query, queryParams);
 
         const reportData = result.rows.map(item => {
-            const totalSeconds = Number(item.logDuration) || 0;
+            const totalSeconds = Number(item.averageDuration);
             const days = Math.floor(totalSeconds / 86400);
             const hours = Math.floor((totalSeconds % 86400) / 3600);
             const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -152,11 +155,10 @@ router.get('/reports/data', async (req, res) => {
                 id: item.id,
                 channelName: item.channelName,
                 videoTitle: item.videoTitle,
-                status: item.currentStatus.replace(/_/g, ' '),
-                createdAt: item.logDate,  // Usando data do log
+                status: item.currentStatus.replace(/_/g, ' '),  // Status formatado
                 averageTime: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`,
                 rawData: {
-                    totalTasks: item.targetStatus ? 1 : 0,  // Conta como tarefa se houve mudança de status
+                    totalTasks: item.totalTasks,
                     averageSeconds: totalSeconds
                 }
             };
