@@ -81,20 +81,23 @@ router.get('/reports/data', async (req, res) => {
         client = await req.db.connect();
         let queryParams = [companyId];
 
+        // Query atualizada para retornar cada log como entrada única
         let query = `
             SELECT 
-                v.id,
+                l.id AS "logId",
+                v.id AS "videoId",
                 c.name AS "channelName",
                 v.title AS "videoTitle",
-                v.status AS "currentStatus",
-                COALESCE(AVG(l.duration), 0) AS "averageDuration",
-                COUNT(l.id) AS "totalTasks",
-                COALESCE(ARRAY_AGG(l.created_at) FILTER (WHERE l.created_at IS NOT NULL), '{}'::timestamp[]) AS "logDates"
-            FROM videos v
+                l.from_status AS "fromStatus",
+                l.to_status AS "toStatus",
+                l.created_at AS "logDate",
+                l.duration AS "durationSeconds",
+                l.freelancer_id AS "freelancerId"
+            FROM video_logs l
+            INNER JOIN videos v ON l.video_id = v.id
             LEFT JOIN channels c ON v.channel_id = c.id
-            LEFT JOIN video_logs l ON v.id = l.video_id 
-                AND l.duration > 0
             WHERE v.company_id = $1
+            AND l.action = 'status_change'
         `;
 
         const addCondition = (value, column, operator = '>=') => {
@@ -104,8 +107,9 @@ router.get('/reports/data', async (req, res) => {
             }
         };
 
-        addCondition(startDate, 'v.created_at');
-        addCondition(endDate, 'v.created_at', '<=');
+        // Filtros baseados nos logs
+        addCondition(startDate, 'l.created_at');
+        addCondition(endDate, 'l.created_at', '<=');
 
         if (channelId) {
             queryParams.push(channelId);
@@ -113,68 +117,53 @@ router.get('/reports/data', async (req, res) => {
         }
 
         if (freelancerId) {
-            queryParams.push(freelancerId, freelancerId, freelancerId, freelancerId);
-            query += `
-                AND (
-                    v.script_writer_id = $${queryParams.length - 3}
-                    OR v.editor_id = $${queryParams.length - 2}
-                    OR v.narrator_id = $${queryParams.length - 1}
-                    OR v.thumb_maker_id = $${queryParams.length}
-                )
-            `;
+            queryParams.push(freelancerId);
+            query += ` AND l.freelancer_id = $${queryParams.length}`;
         }
 
         if (status) {
             const statusList = status.split(',');
-            query += ` AND v.status IN (${statusList.map((_, i) => `$${queryParams.length + i + 1}`).join(',')})`;
+            query += ` AND l.to_status IN (${statusList.map((_, i) => `$${queryParams.length + i + 1}`).join(',')})`;
             queryParams.push(...statusList);
         }
 
-        query += `
-            GROUP BY 
-                v.id, 
-                c.name, 
-                v.title, 
-                v.status
-            ORDER BY 
-                v.title
-        `;
+        query += ` ORDER BY l.created_at DESC`;
 
         const result = await client.query(query, queryParams);
 
+        // Formatação dos dados
         const reportData = result.rows.map(item => {
-            const totalSeconds = Number(item.averageDuration);
+            const totalSeconds = Number(item.durationSeconds) || 0;
             const days = Math.floor(totalSeconds / 86400);
             const hours = Math.floor((totalSeconds % 86400) / 3600);
             const minutes = Math.floor((totalSeconds % 3600) / 60);
             const seconds = Math.floor(totalSeconds % 60);
 
             return {
-                id: item.id,
+                id: item.logId,
+                videoId: item.videoId,
                 channelName: item.channelName,
                 videoTitle: item.videoTitle,
-                status: item.currentStatus.replace(/_/g, ' '),
-                averageTime: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`,
-                rawData: {
-                    totalTasks: item.totalTasks,
-                    averageSeconds: totalSeconds
+                logDate: item.logDate,
+                statusTransition: {
+                    from: item.fromStatus?.replace(/_/g, ' ') || 'Não Definido',
+                    to: item.toStatus?.replace(/_/g, ' ') || 'Não Definido'
                 },
-                logDates: item.logDates.map(date => date.toISOString())
+                duration: {
+                    formatted: `${days > 0 ? `${days}d ` : ''}${hours > 0 ? `${hours}h ` : ''}${minutes}m ${seconds}s`,
+                    seconds: totalSeconds
+                },
+                freelancerId: item.freelancerId
             };
         });
 
         res.json(reportData);
 
     } catch (error) {
-        console.error('Erro ao gerar relatório:', {
-            error: error.message,
-            stack: error.stack,
-            query: req.query
-        });
+        console.error('Erro ao gerar relatório:', error);
         res.status(500).json({
             code: 'REPORT_ERROR',
-            message: 'Erro na geração do relatório',
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined
+            message: 'Erro na geração do relatório'
         });
     } finally {
         if (client) client.release();
